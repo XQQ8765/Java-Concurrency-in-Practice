@@ -1,0 +1,68 @@
+2.5. Liveness and Performance
+
+In UnsafeCachingFactorizer, we introduced some caching into our factoring servlet in the hope of improving performance. Caching required some shared state, which in turn required synchronization to maintain the integrity of that state. But the way we used synchronization in SynchronizedFactorizer makes it perform badly. The synchronization policy for SynchronizedFactorizer is to guard each state variable with the servlet object¡¯s intrinsic lock, and that policy was implemented by synchronizing the entirety of the service method. This simple, coarse-grained approach restored safety, but at a high price.
+
+Because service is synchronized, only one thread may execute it at once. This subverts the intended use of the servlet framework¡ªthat servlets be able to handle multiple requests simultaneously¡ªand can result in frustrated users if the load is high enough. If the servlet is busy factoring a large number, other clients have to wait until the current request is complete before the servlet can start on the new number. If the system has multiple CPUs, processors may remain idle even if the load is high. In any case, even short-running requests, such as those for which the value is cached, may take an unexpectedly long time because they must wait for previous long-running requests to complete.
+
+Figure 2.1 shows what happens when multiple requests arrive for the synchronized factoring servlet: they queue up and are handled sequentially. We would describe this web application as exhibiting poor concurrency: the number of simultaneous invocations is limited not by the availability of processing resources, but by the structure of the application itself. Fortunately, it is easy to improve the concurrency of the servlet while maintaining thread safety by narrowing the scope of the synchronized block. You should be careful not to make the scope of the synchronized block too small; you would not want to divide an operation that should be atomic into more than one synchronized block. But it is reasonable to try to exclude from synchronized blocks long-running operations that do not affect shared state, so that other threads are not prevented from accessing the shared state while the long-running operation is in progress.
+
+Figure 2.1. Poor Concurrency of SynchronizedFactorizer.
+
+
+
+
+CachedFactorizer in Listing 2.8 restructures the servlet to use two separate synchronized blocks, each limited to a short section of code. One guards the check-then-act sequence that tests whether we can just return the cached result, and the other guards updating both the cached number and the cached factors. As a bonus, we¡¯ve reintroduced the hit counter and added a ¡°cache hit¡± counter as well, updating them within the initial synchronized block. Because these counters constitute shared mutable state as well, we must use synchronization everywhere they are accessed. The portions of code that are outside the synchronized blocks operate exclusively on local (stack-based) variables, which are not shared across threads and therefore do not require synchronization.
+
+Listing 2.8. Servlet that Caches its Last Request and Result.
+
+Code View: Scroll / Show All
+@ThreadSafe
+public class CachedFactorizer implements Servlet {
+    @GuardedBy("this") private BigInteger lastNumber;
+    @GuardedBy("this") private BigInteger[] lastFactors;
+    @GuardedBy("this") private long hits;
+    @GuardedBy("this") private long cacheHits;
+
+    public synchronized long getHits() { return hits; }
+    public synchronized double getCacheHitRatio() {
+        return (double) cacheHits / (double) hits;
+    }
+
+    public void service(ServletRequest req, ServletResponse resp) {
+        BigInteger i = extractFromRequest(req);
+        BigInteger[] factors = null;
+        synchronized (this) {
+            ++hits;
+            if (i.equals(lastNumber)) {
+                ++cacheHits;
+                factors = lastFactors.clone();
+            }
+        }
+        if (factors == null) {
+            factors = factor(i);
+            synchronized (this)  {
+                lastNumber = i;
+                lastFactors = factors.clone();
+            }
+        }
+        encodeIntoResponse(resp, factors);
+    }
+}
+
+
+					  
+
+CachedFactorizer no longer uses AtomicLong for the hit counter, instead reverting to using a long field. It would be safe to use AtomicLong here, but there is less benefit than there was in CountingFactorizer. Atomic variables are useful for effecting atomic operations on a single variable, but since we are already using synchronized blocks to construct atomic operations, using two different synchronization mechanisms would be confusing and would offer no performance or safety benefit.
+
+The restructuring of CachedFactorizer provides a balance between simplicity (synchronizing the entire method) and concurrency (synchronizing the shortest possible code paths). Acquiring and releasing a lock has some overhead, so it is undesirable to break down synchronized blocks too far (such as factoring ++hits into its own synchronized block), even if this would not compromise atomicity. CachedFactorizer holds the lock when accessing state variables and for the duration of compound actions, but releases it before executing the potentially long-running factorization operation. This preserves thread safety without unduly affecting concurrency; the code paths in each of the synchronized blocks are ¡°short enough¡±.
+
+Deciding how big or small to make synchronized blocks may require tradeoffs among competing design forces, including safety (which must not be compromised), simplicity, and performance. Sometimes simplicity and performance are at odds with each other, although as CachedFactorizer illustrates, a reasonable balance can usually be found.
+
+There is frequently a tension between simplicity and performance. When implementing a synchronization policy, resist the temptation to prematurely sacriflce simplicity (potentially compromising safety) for the sake of performance.
+
+
+Whenever you use locking, you should be aware of what the code in the block is doing and how likely it is to take a long time to execute. Holding a lock for a long time, either because you are doing something compute-intensive or because you execute a potentially blocking operation, introduces the risk of liveness or performance problems.
+
+Avoid holding locks during lengthy computations or operations at risk of not completing quickly such as network or console I/O.
+
+

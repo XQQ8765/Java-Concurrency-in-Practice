@@ -1,0 +1,41 @@
+2.4. Guarding State with Locks
+
+Because locks enable serialized [8] access to the code paths they guard, we can use them to construct protocols for guaranteeing exclusive access to shared state. Following these protocols consistently can ensure state consistency.
+
+[8] Serializing access to an object has nothing to do with object serialization (turning an object into a byte stream); serializing access means that threads take turns accessing the object exclusively, rather than doing so concurrently.
+
+Compound actions on shared state, such as incrementing a hit counter (read-modify-write) or lazy initialization (check-then-act), must be made atomic to avoid race conditions. Holding a lock for the entire duration of a compound action can make that compound action atomic. However, just wrapping the compound action with a synchronized block is not sufficient; if synchronization is used to coordinate access to a variable, it is needed everywhere that variable is accessed. Further, when using locks to coordinate access to a variable, the same lock must be used wherever that variable is accessed.
+
+It is a common mistake to assume that synchronization needs to be used only when writing to shared variables; this is simply not true. (The reasons for this will become clearer in Section 3.1.)
+
+For each mutable state variable that may be accessed by more than one thread, all accesses to that variable must be performed with the same lock held. In this case, we say that the variable is guarded by that lock.
+
+
+In SynchronizedFactorizer in Listing 2.6, lastNumber and lastFactors are guarded by the servlet object¡¯s intrinsic lock; this is documented by the @GuardedBy annotation.
+
+There is no inherent relationship between an object¡¯s intrinsic lock and its state; an object¡¯s fields need not be guarded by its intrinsic lock, though this is a perfectly valid locking convention that is used by many classes. Acquiring the lock associated with an object does not prevent other threads from accessing that object¡ªthe only thing that acquiring a lock prevents any other thread from doing is acquiring that same lock. The fact that every object has a built-in lock is just a convenience so that you needn¡¯t explicitly create lock objects. [9] It is up to you to construct locking protocols or synchronization policies that let you access shared state safely, and to use them consistently throughout your program.
+
+[9] In retrospect, this design decision was probably a bad one: not only can it be confusing, but it forces JVM implementors to make tradeoffs between object size and locking performance.
+
+Every shared, mutable variable should be guarded by exactly one lock. Make it clear to maintainers which lock that is.
+
+
+A common locking convention is to encapsulate all mutable state within an object and to protect it from concurrent access by synchronizing any code path that accesses mutable state using the object¡¯s intrinsic lock. This pattern is used by many thread-safe classes, such as Vector and other synchronized collection classes. In such cases, all the variables in an object¡¯s state are guarded by the object¡¯s intrinsic lock. However, there is nothing special about this pattern, and neither the compiler nor the runtime enforces this (or any other) pattern of locking. [10] It is also easy to subvert this locking protocol accidentally by adding a new method or code path and forgetting to use synchronization.
+
+[10] Code auditing tools like FindBugs can identify when a variable is frequently but not always accessed with a lock held, which may indicate a bug.
+
+Not all data needs to be guarded by locks¡ªonly mutable data that will be accessed from multiple threads. In Chapter 1, we described how adding a simple asynchronous event such as a TimerTask can create thread safety requirements that ripple throughout your program, especially if your program state is poorly encapsulated. Consider a single-threaded program that processes a large amount of data. Single-threaded programs require no synchronization, because no data is shared across threads. Now imagine you want to add a feature to create periodic snapshots of its progress, so that it does not have to start again from the beginning if it crashes or must be stopped. You might choose to do this with a TimerTask that goes off every ten minutes, saving the program state to a file.
+
+Since the TimerTask will be called from another thread (one managed by Timer), any data involved in the snapshot is now accessed by two threads: the main program thread and the Timer thread. This means that not only must the TimerTask code use synchronization when accessing the program state, but so must any code path in the rest of the program that touches that same data. What used to require no synchronization now requires synchronization throughout the program.
+
+When a variable is guarded by a lock¡ªmeaning that every access to that variable is performed with that lock held¡ªyou¡¯ve ensured that only one thread at a time can access that variable. When a class has invariants that involve more than one state variable, there is an additional requirement: each variable participating in the invariant must be guarded by the same lock. This allows you to access or update them in a single atomic operation, preserving the invariant. SynchronizedFactorizer demonstrates this rule: both the cached number and the cached factors are guarded by the servlet object¡¯s intrinsic lock.
+
+For every invariant that involves more than one variable, all the variables involved in that invariant must be guarded by the same lock.
+
+
+If synchronization is the cure for race conditions, why not just declare every method synchronized? It turns out that such indiscriminate application of synchronized might be either too much or too little synchronization. Merely synchronizing every method, as Vector does, is not enough to render compound actions on a Vector atomic:
+
+if (!vector.contains(element))
+    vector.add(element);
+
+This attempt at a put-if-absent operation has a race condition, even though both contains and add are atomic. While synchronized methods can make individual operations atomic, additional locking is requiredwhen multiple operations are combined into a compound action. (See Section 4.4 for some techniques for safely adding additional atomic operations to thread-safe objects.) At the same time, synchronizing every method can lead to liveness or performance problems, as we saw in SynchronizedFactorizer.

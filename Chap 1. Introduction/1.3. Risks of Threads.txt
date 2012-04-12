@@ -1,0 +1,68 @@
+1.3. Risks of Threads
+
+Java¡¯s built-in support for threads is a double-edged sword. While it simplifies the development of concurrent applications by providing language and library support and a formal cross-platform memory model (it is this formal cross-platform memory model thatmakes possible the development of write-once, run-anywhere concurrent applications in Java), it also raises the bar for developers because more programs will use threads. When threads were more esoteric, concurrency was an ¡°advanced¡± topic; now, mainstream developers must be aware of thread-safety issues.
+
+1.3.1. Safety Hazards
+
+Thread safety can be unexpectedly subtle because, in the absence of sufficient synchronization, the ordering of operations in multiple threads is unpredictable and sometimes surprising. UnsafeSequence in Listing 1.1, which is supposed to generate a sequence of unique integer values, offers a simple illustration of how the interleaving of actions in multiple threads can lead to undesirable results. It behaves correctly in a single-threaded environment, but in a multithreaded environment does not.
+
+Listing 1.1. Non-thread-safe Sequence Generator.
+
+
+@NotThreadSafe
+public class UnsafeSequence {
+    private int value;
+
+    /** Returns a unique value. */
+    public int getNext() {
+        return value++;
+    }
+}
+
+The problem with UnsafeSequence is that with some unlucky timing, two threads could call getNext and receive the same value. Figure 1.1 shows how this can happen. The increment notation, someVariable++, may appear to be a single operation, but is in fact three separate operations: read the value, add one to it, and write out the new value. Since operations in multiple threads may be arbitrarily interleaved by the runtime, it is possible for two threads to read the value at the same time, both see the same value, and then both add one to it. The result is that the same sequence number is returned from multiple calls in different threads.
+
+Figure 1.1. Unlucky Execution of UnsafeSequence.getNext.
+
+
+
+
+Diagrams like Figure 1.1 depict possible interleavings of operations in different threads. In these diagrams, time runs from left to right, and each line represents the activities of a different thread. These interleaving diagrams usually depict the worst case[2] and are intended to show the danger of incorrectly assuming things will happen in a particular order.
+
+
+[2] Actually, as we¡¯ll see in Chapter 3, the worst case can be even worse than these diagrams usually show because of the possibility of reordering.
+
+UnsafeSequence uses a nonstandard annotation: @NotThreadSafe. This is one of several custom annotations used throughout this book to document concurrency properties of classes and class members. (Other class-level annotations used in this way are @ThreadSafe and @Immutable; see Appendix A for details.) Annotations documenting thread safety are useful to multiple audiences. If a class is annotated with @ThreadSafe, users can use it with confidence in a multithreaded environment, maintainers are put on notice that it makes thread safety guarantees that must be preserved, and software analysis tools can identify possible coding errors.
+
+UnsafeSequence illustrates a common concurrency hazard called a race condition. Whether or not getNext returns a unique value when called from multiple threads, as required by its specification, depends on how the runtime interleaves the operations¡ªwhich is not a desirable state of affairs.
+
+Because threads share the same memory address space and run concurrently, they can access or modify variables that other threads might be using. This is a tremendous convenience, because it makes data sharing much easier than would other inter-thread communications mechanisms. But it is also a significant risk: threads can be confused by having data change unexpectedly. Allowing multiple threads to access and modify the same variables introduces an element of nonsequentiality into an otherwise sequential programming model, which can be confusing and difficult to reason about. For a multithreaded program¡¯s behavior to be predictable, access to shared variables must be properly coordinated so that threads do not interfere with one another. Fortunately, Java provides synchronization mechanisms to coordinate such access.
+
+UnsafeSequence can be fixed by making getNext a synchronized method, as shown in Sequence in Listing 1.2,[3] thus preventing the unfortunate interaction in Figure 1.1. (Exactly why this works is the subject of Chapters 2 and 3.)
+
+[3] @GuardedBy is described in Section 2.4; it documents the synchronization policy for Sequence.
+
+Listing 1.2. Thread-safe Sequence Generator.
+
+@ThreadSafe
+public class Sequence {
+    @GuardedBy("this") private int Value;
+
+    public synchronized int getNext() {
+        return Value++;
+    }
+}
+
+In the absence of synchronization, the compiler, hardware, and runtime are allowed to take substantial liberties with the timing and ordering of actions, such as caching variables in registers or processor-local caches where they are temporarily (or even permanently) invisible to other threads. These tricks are in aid of better performance and are generally desirable, but they place a burden on the developer to clearly identify where data is being shared across threads so that these optimizations do not undermine safety. (Chapter 16 gives the gory details on exactly what ordering guarantees the JVM makes and how synchronization affects those guarantees, but if you follow the rules in Chapters 2 and 3, you can safely avoid these low-level details.)
+
+1.3.2. Liveness Hazards
+
+It is critically important to pay attention to thread safety issues when developing concurrent code: safety cannot be compromised. The importance of safety is not unique to multithreaded programs¡ªsingle-threaded programs also must take care to preserve safety and correctness¡ªbut the use of threads introduces additional safety hazards not present in single-threaded programs. Similarly, the use of threads introduces additional forms of liveness failure that do not occur in single-threaded programs.
+
+While safety means ¡°nothing bad ever happens¡±, liveness concerns the complementary goal that ¡°something good eventually happens¡±. A liveness failure occurs when an activity gets into a state such that it is permanently unable to make forward progress. One form of liveness failure that can occur in sequential programs is an inadvertent infinite loop, where the code that follows the loop never gets executed. The use of threads introduces additional liveness risks. For example, if thread A is waiting for a resource that thread B holds exclusively, and B never releases it, A will wait forever. Chapter 10 describes various forms of liveness failures and how to avoid them, including deadlock (Section 10.1), starvation (Section 10.3.1), and livelock (Section 10.3.3). Like most concurrency bugs, bugs that cause liveness failures can be elusive because they depend on the relative timing of events in different threads, and therefore do not always manifest themselves in development or testing.
+
+1.3.3. Performance Hazards
+
+Related to liveness is performance. While liveness means that something good eventually happens, eventually may not be good enough¡ªwe often want good things to happen quickly. Performance issues subsume a broad range of problems, including poor service time, responsiveness, throughput, resource consumption, or scalability. Just as with safety and liveness, multithreaded programs are subject to all the performance hazards of single-threaded programs, and to others as well that are introduced by the use of threads.
+
+In well designed concurrent applications the use of threads is a net performance gain, but threads nevertheless carry some degree of runtime overhead. Context switches¡ªwhen the scheduler suspends the active thread temporarily so another thread can run¡ªare more frequent in applications with many threads, and have significant costs: saving and restoring execution context, loss of locality, and CPU time spent scheduling threads instead of running them. When threads share data, they must use synchronization mechanisms that can inhibit compiler optimizations, flush or invalidate memory caches, and create synchronization traffic on the shared memory bus. All these factors introduce additional performance costs; Chapter 11 covers techniques for analyzing and reducing these costs.
+

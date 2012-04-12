@@ -1,0 +1,104 @@
+2.3. Locking
+
+We were able to add one state variable to our servlet while maintaining thread safety by using a thread-safe object to manage the entire state of the servlet. But if we want to add more state to our servlet, can we just add more thread-safe state variables?
+
+Imagine that we want to improve the performance of our servlet by caching the most recently computed result, just in case two consecutive clients request factorization of the same number. (This is unlikely to be an effective caching strategy; we offer a better one in Section 5.6.) To implement this strategy, we need to remember two things: the last number factored, and its factors.
+
+We used AtomicLong to manage the counter state in a thread-safe manner; could we perhaps use its cousin, AtomicReference, [6] to manage the last number and its factors? An attempt at this is shown in UnsafeCachingFactorizer in Listing 2.5.
+
+[6] Just as AtomicLong is a thread-safe holder class for a long integer, AtomicReference is a threadsafe holder class for an object reference. Atomic variables and their benefits are covered in Chapter 15.
+
+Listing 2.5. Servlet that Attempts to Cache its Last Result without Adequate Atomicity. Don¨t Do this.
+
+
+@NotThreadSafe
+public class UnsafeCachingFactorizer implements Servlet {
+     private final AtomicReference<BigInteger> lastNumber
+         = new AtomicReference<BigInteger>();
+     private final AtomicReference<BigInteger[]>  lastFactors
+         = new AtomicReference<BigInteger[]>();
+
+     public void service(ServletRequest req, ServletResponse resp) {
+         BigInteger i = extractFromRequest(req);
+         if (i.equals(lastNumber.get()))
+             encodeIntoResponse(resp,  lastFactors.get() );
+         else {
+             BigInteger[] factors = factor(i);
+             lastNumber.set(i);
+             lastFactors.set(factors);
+             encodeIntoResponse(resp, factors);
+         }
+     }
+}
+
+Unfortunately, this approach does not work. Even though the atomic references are individually thread-safe, UnsafeCachingFactorizer has race conditions that could make it produce the wrong answer.
+
+The definition of thread safety requires that invariants be preserved regardless of timing or interleaving of operations in multiple threads. One invariant of UnsafeCachingFactorizer is that the product of the factors cached in lastFactors equal the value cached in lastNumber; our servlet is correct only if this invariant always holds. When multiple variables participate in an invariant, they are not independent: the value of one constrains the allowed value(s) of the others. Thus when updating one, you must update the others in the same atomic operation.
+
+With some unlucky timing, UnsafeCachingFactorizer can violate this invariant. Using atomic references, we cannot update both lastNumber and lastFactors simultaneously, even though each call to set is atomic; there is still a window of vulnerability when one has been modified and the other has not, and during that time other threads could see that the invariant does not hold. Similarly, the two values cannot be fetched simultaneously: between the time when thread A fetches the two values, thread B could have changed them, and again A may observe that the invariant does not hold.
+
+To preserve state consistency, update related state variables in a single atomic operation.
+
+
+2.3.1. Intrinsic Locks
+
+Java provides a built-in locking mechanism for enforcing atomicity: the synchronized block. (There is also another critical aspect to locking and other synchronization mechanisms！visibility！which is covered in Chapter 3.) A synchronized block has two parts: a reference to an object that will serve as the lock, and a block of code to be guarded by that lock. A synchronized method is a shorthand for a synchronized block that spans an entire method body, and whose lock is the object on which the method is being invoked. (Static synchronized methods use the Class object for the lock.)
+
+synchronized (lock) {
+    // Access or modify shared state guarded by lock
+}
+
+Every Java object can implicitly act as a lock for purposes of synchronization; these built-in locks are called intrinsic locks or monitor locks. The lock is automatically acquired by the executing thread before entering a synchronized block and automatically released when control exits the synchronized block, whether by the normal control path or by throwing an exception out of the block. The only way to acquire an intrinsic lock is to enter a synchronized block or method guarded by that lock.
+
+Intrinsic locks in Java act as mutexes (or mutual exclusion locks), which means that at most one thread may own the lock. When thread A attempts to acquire a lock held by thread B, A must wait, or block, until B releases it. If B never releases the lock, A waits forever.
+
+Since only one thread at a time can execute a block of code guarded by a given lock, the synchronized blocks guarded by the same lock execute atomically with respect to one another. In the context of concurrency, atomicity means the same thing as it does in transactional applications！that a group of statements appear to execute as a single, indivisible unit. No thread executing a synchronized block can observe another thread to be in the middle of a synchronized block guarded by the same lock.
+
+The machinery of synchronization makes it easy to restore thread safety to the factoring servlet. Listing 2.6 makes the service method synchronized, so only one thread may enter service at a time. SynchronizedFactorizer is now thread-safe; however, this approach is fairly extreme, since it inhibits multiple clients from using the factoring servlet simultaneously at all！resulting in unacceptably poor responsiveness. This problem！which is a performance problem, not a thread safety problem！is addressed in Section 2.5.
+
+Listing 2.6. Servlet that Caches Last Result, But with Unnacceptably Poor Concurrency. Don¨t Do this.
+
+
+@ThreadSafe
+public class SynchronizedFactorizer implements Servlet {
+    @GuardedBy("this") private BigInteger lastNumber;
+    @GuardedBy("this") private BigInteger[] lastFactors;
+
+    public synchronized void service(ServletRequest req,
+                                     ServletResponse resp) {
+        BigInteger i = extractFromRequest(req);
+        if (i.equals(lastNumber))
+            encodeIntoResponse(resp, lastFactors);
+        else {
+            BigInteger[] factors = factor(i);
+            lastNumber = i;
+            lastFactors = factors;
+            encodeIntoResponse(resp, factors);
+        }
+    }
+}
+
+2.3.2. Reentrancy
+
+When a thread requests a lock that is already held by another thread, the requesting thread blocks. But because intrinsic locks are reentrant, if a thread tries to acquire a lock that it already holds, the request succeeds. Reentrancy means that locks are acquired on a per-thread rather than per-invocation basis. [7] Reentrancy is implemented by associating with each lock an acquisition count and an owning thread. When the count is zero, the lock is considered unheld. When a thread acquires a previously unheld lock, the JVM records the owner and sets the acquisition count to one. If that same thread acquires the lock again, the count is incremented, and when the owning thread exits the synchronized block, the count is decremented. When the count reaches zero, the lock is released.
+
+[7] This differs from the default locking behavior for pthreads (POSIX threads) mutexes, which are granted on a per-invocation basis.
+
+Reentrancy facilitates encapsulation of locking behavior, and thus simplifies the development of object-oriented concurrent code. Without reentrant locks, the very natural-looking code in Listing 2.7, in which a subclass overrides a synchronized method and then calls the superclass method, would deadlock. Because the doSomething methods in Widget and LoggingWidget are both synchronized, each tries to acquire the lock on the Widget before proceeding. But if intrinsic locks were not reentrant, the call to super.doSomething would never be able to acquire the lock because it would be considered already held, and the thread would permanently stall waiting for a lock it can never acquire. Reentrancy saves us from deadlock in situations like this.
+
+Listing 2.7. Code that would Deadlock if Intrinsic Locks were Not Reentrant.
+
+public class Widget {
+    public synchronized void doSomething() {
+        ...
+    }
+}
+
+public class LoggingWidget extends Widget {
+    public synchronized void doSomething() {
+        System.out.println(toString() + ": calling doSomething");
+        super.doSomething();
+    }
+}
+
+

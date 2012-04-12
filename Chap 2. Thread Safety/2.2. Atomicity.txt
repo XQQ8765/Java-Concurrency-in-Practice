@@ -1,0 +1,100 @@
+2.2. Atomicity
+
+What happens when we add one element of state to what was a stateless object? Suppose we want to add a ¡°hit counter¡± that measures the number of requests processed. The obvious approach is to add a long field to the servlet and increment it on each request, as shown in UnsafeCountingFactorizer in Listing 2.2.
+
+Listing 2.2. Servlet that Counts Requests without the Necessary Synchronization. Don¡¯t Do this.
+
+
+@NotThreadSafe
+public class UnsafeCountingFactorizer implements Servlet {
+    private long count = 0;
+
+    public long getCount() { return count; }
+
+    public void service(ServletRequest req, ServletResponse resp) {
+        BigInteger i = extractFromRequest(req);
+        BigInteger[] factors = factor(i);
+        ++count;
+        encodeIntoResponse(resp, factors);
+    }
+
+}
+
+Unfortunately, UnsafeCountingFactorizer is not thread-safe, even though it would work just fine in a single-threaded environment. Just like UnsafeSequence on page 6, it is susceptible to lost updates. While the increment operation, ++count, may look like a single action because of its compact syntax, it is not atomic, which means that it does not execute as a single, indivisible operation. Instead, it is a shorthand for a sequence of three discrete operations: fetch the current value, add one to it, and write the new value back. This is an example of a read-modify-write operation, in which the resulting state is derived from the previous state.
+
+Figure 1.1 on page 6 shows what can happen if two threads try to increment a counter simultaneously without synchronization. If the counter is initially 9, with some unlucky timing each thread could read the value, see that it is 9, add one to it, and each set the counter to 10. This is clearly not what is supposed to happen; an increment got lost along the way, and the hit counter is now permanently off by one.
+
+You might think that having a slightly inaccurate count of hits in a web-based service is an acceptable loss of accuracy, and sometimes it is. But if the counter is being used to generate sequences or unique object identifiers, returning the same value from multiple invocations could cause serious data integrity problems.[3] The possibility of incorrect results in the presence of unlucky timing is so important in concurrent programming that it has a name: a race condition.
+
+[3] The approach taken by UnsafeSequence and UnsafeCountingFactorizer has other serious problems, including the possibility of stale data (Section 3.1.1).
+
+2.2.1. Race Conditions
+
+UnsafeCountingFactorizer has several race conditions that make its results unreliable. A race condition occurs when the correctness of a computation depends on the relative timing or interleaving of multiple threads by the runtime; in other words, when getting the right answer relies on lucky timing. [4] The most common type of race condition is check-then-act, where a potentially stale observation is used to make a decision on what to do next.
+
+[4] The term race condition is often confused with the related term data race, which arises when synchronization is not used to coordinate all access to a shared nonfinal field. You risk a data race whenever a thread writes a variable that might next be read by another thread or reads a variable that might have last been written by another thread if both threads do not use synchronization; code with data races has no useful defined semantics under the Java Memory Model. Not all race conditions are data races, and not all data races are race conditions, but they both can cause concurrent programs to fail in unpredictable ways. UnsafeCountingFactorizer has both race conditions and data races. See Chapter 16 for more on data races.
+
+We often encounter race conditions in real life. Let¡¯s say you planned to meet a friend at noon at the Starbucks on University Avenue. But when you get there, you realize there are two Starbucks on University Avenue, and you¡¯re not sure which one you agreed to meet at. At 12:10, you don¡¯t see your friend at Starbucks A, so you walk over to Starbucks B to see if he¡¯s there, but he isn¡¯t there either. There are a few possibilities: your friend is late and not at either Starbucks; your friend arrived at Starbucks A after you left; or your friend was at Starbucks B, but went to look for you, and is now en route to Starbucks A. Let¡¯s assume the worst and say it was the last possibility. Now it¡¯s 12:15, you¡¯ve both been to both Starbucks, and you¡¯re both wondering if you¡¯ve been stood up. What do you do now? Go back to the other Starbucks? How many times are you going to go back and forth? Unless you have agreed on a protocol, you could both spend the day walking up and down University Avenue, frustrated and undercaffeinated.
+
+The problem with the ¡°I¡¯ll just nip up the street and see if he¡¯s at the other one¡± approach is that while you¡¯re walking up the street, your friend might have moved. You look around Starbucks A, observe ¡°he¡¯s not here¡±, and go looking for him. And you can do the same for Starbucks B, but not at the same time. It takes a few minutes to walk up the street, and during those few minutes, the state of the system may have changed.
+
+The Starbucks example illustrates a race condition because reaching the desired outcome (meeting your friend) depends on the relative timing of events (when each of you arrives at one Starbucks or the other, how long you wait there before switching, etc). The observation that he is not at Starbucks A becomes potentially invalid as soon as you walk out the front door; he could have come in through the back door and you wouldn¡¯t know. It is this invalidation of observations that characterizes most race conditions¡ªusing a potentially stale observation to make a decision or perform a computation. This type of race condition is called check-then-act: you observe something to be true (file X doesn¡¯t exist) and then take action based on that observation (create X); but in fact the observation could have become invalid between the time you observed it and the time you acted on it (someone else created X in the meantime), causing a problem (unexpected exception, overwritten data, file corruption).
+
+2.2.2. Example: Race Conditions in Lazy Initialization
+
+A common idiom that uses check-then-act is lazy initialization. The goal of lazy initialization is to defer initializing an object until it is actually needed while at the same time ensuring that it is initialized only once. LazyInitRace in Listing 2.3 illustrates the lazy initialization idiom. The getInstance method first checks whether the ExpensiveObject has already been initialized, in which case it returns the existing instance; otherwise it creates a new instance and returns it after retaining a reference to it so that future invocations can avoid the more expensive code path.
+
+Listing 2.3. Race Condition in Lazy Initialization. Don¡¯t Do this.
+
+
+@NotThreadSafe
+public class LazyInitRace {
+    private ExpensiveObject instance = null;
+
+    public ExpensiveObject getInstance() {
+        if (instance == null)
+            instance = new ExpensiveObject();
+        return instance;
+    }
+}
+
+LazyInitRace has race conditions that can undermine its correctness. Say that threads A and B execute getInstance at the same time. A sees that instance is null, and instantiates a new ExpensiveObject. B also checks if instance is null. Whether instance is null at this point depends unpredictably on timing, including the vagaries of scheduling and how long A takes to instantiate the ExpensiveObject and set the instance field. If instance is null when B examines it, the two callers to getInstance may receive two different results, even though getInstance is always supposed to return the same instance.
+
+The hit-counting operation in UnsafeCountingFactorizer has another sort of race condition. Read-modify-write operations, like incrementing a counter, define a transformation of an object¡¯s state in terms of its previous state. To increment a counter, you have to know its previous value and make sure no one else changes or uses that value while you are in mid-update.
+
+Like most concurrency errors, race conditions don¡¯t always result in failure: some unlucky timing is also required. But race conditions can cause serious problems. If LazyInitRace is used to instantiate an application-wide registry, having it return different instances from multiple invocations could cause registrations to be lost or multiple activities to have inconsistent views of the set of registered objects. If UnsafeSequence is used to generate entity identifiers in a persistence framework, two distinct objects could end up with the same ID, violating identity integrity constraints.
+
+2.2.3. Compound Actions
+
+Both LazyInitRace and UnsafeCountingFactorizer contained a sequence of operations that needed to be atomic, or indivisible, relative to other operations on the same state. To avoid race conditions, there must be a way to prevent other threads from using a variable while we¡¯re in the middle of modifying it, so we can ensure that other threads can observe or modify the state only before we start or after we finish, but not in the middle.
+
+Operations A and B are atomic with respect to each other if, from the perspective of a thread executing A, when another thread executes B, either all of B has executed or none of it has. An atomic operation is one that is atomic with respect to all operations, including itself, that operate on the same state.
+
+
+If the increment operation in UnsafeSequence were atomic, the race condition illustrated in Figure 1.1 on page 6 could not occur, and each execution of the increment operation would have the desired effect of incrementing the counter by exactly one. To ensure thread safety, check-then-act operations (like lazy initialization) and read-modify-write operations (like increment) must always be atomic. We refer collectively to check-then-act and read-modify-write sequences as compound actions: sequences of operations that must be executed atomically in order to remain thread-safe. In the next section, we¡¯ll consider locking, Java¡¯s builtin mechanism for ensuring atomicity. For now, we¡¯re going to fix the problem another way, by using an existing thread-safe class, as shown in CountingFactorizer in Listing 2.4.
+
+Listing 2.4. Servlet that Counts Requests Using AtomicLong.
+
+@ThreadSafe
+public class CountingFactorizer implements Servlet {
+    private final AtomicLong count = new AtomicLong(0);
+
+    public long getCount() { return count.get(); }
+
+    public void service(ServletRequest req, ServletResponse resp) {
+        BigInteger i = extractFromRequest(req);
+        BigInteger[] factors = factor(i);
+        count.incrementAndGet();
+        encodeIntoResponse(resp, factors);
+    }
+}
+
+The java.util.concurrent.atomic package contains atomic variable classes for effecting atomic state transitions on numbers and object references. By replacing the long counter with an AtomicLong, we ensure that all actions that access the counter state are atomic. [5] Because the state of the servlet is the state of the counter and the counter is thread-safe, our servlet is once again thread-safe.
+
+[5] CountingFactorizer calls incrementAndGet to increment the counter, which also returns the incremented value; in this case the return value is ignored.
+
+We were able to add a counter to our factoring servlet and maintain thread safety by using an existing thread-safe class to manage the counter state, AtomicLong. When a single element of state is added to a stateless class, the resulting class will be thread-safe if the state is entirely managed by a thread-safe object. But, as we¡¯ll see in the next section, going from one state variable to more than one is not necessarily as simple as going from zero to one.
+
+Where practical, use existing thread-safe objects, like AtomicLong, to manage your class¡¯s state. It is simpler to reason about the possible states and state transitions for existing thread-safe objects than it is for arbitrary state variables, and this makes it easier to maintain and verify thread safety.
+
+

@@ -1,0 +1,95 @@
+Part I: Fundamentals
+
+Thread Safety
+
+Sharing Objects
+
+Composing Objects
+
+Building Blocks
+
+Chapter 2. Thread Safety
+Perhaps surprisingly, concurrent programming isn¡¯t so much about threads or locks, any more than civil engineering is about rivets and I-beams. Of course, building bridges that don¡¯t fall down requires the correct use of a lot of rivets and I-beams, just as building concurrent programs require the correct use of threads and locks. But these are just mechanisms¡ªmeans to an end. Writing thread-safe code is, at its core, about managing access to state, and in particular to shared, mutable state.
+
+Informally, an object¡¯s state is its data, stored in state variables such as instance or static fields. An object¡¯s state may include fields from other, dependent objects; a HashMap¡¯s state is partially stored in the HashMap object itself, but also in many Map.Entry objects. An object¡¯s state encompasses any data that can affect its externally visible behavior.
+
+By shared, we mean that a variable could be accessed by multiple threads; by mutable, we mean that its value could change during its lifetime. We may talk about thread safety as if it were about code, but what we are really trying to do is protect data from uncontrolled concurrent access.
+
+Whether an object needs to be thread-safe depends on whether it will be accessed from multiple threads. This is a property of how the object is used in a program, not what it does. Making an object thread-safe requires using synchronization to coordinate access to its mutable state; failing to do so could result in data corruption and other undesirable consequences.
+
+Whenever more than one thread accesses a given state variable, and one of them might write to it, they all must coordinate their access to it using synchronization. The primary mechanism for synchronization in Java is the synchronized keyword, which provides exclusive locking, but the term ¡°synchronization¡± also includes the use of volatile variables, explicit locks, and atomic variables.
+
+You should avoid the temptation to think that there are ¡°special¡± situations in which this rule does not apply. A program that omits needed synchronization might appear to work, passing its tests and performing well for years, but it is still broken and may fail at any moment.
+
+If multiple threads access the same mutable state variable without appropriate synchronization, your program is broken. There are three ways to fix it:
+
+Don¡¯t share the state variable across threads;
+
+Make the state variable immutable; or
+
+Use synchronization whenever accessing the state variable.
+
+
+If you haven¡¯t considered concurrent access in your class design, some of these approaches can require significant design modifications, so fixing the problem might not be as trivial as this advice makes it sound. It is far easier to design a class to be thread-safe than to retrofit it for thread safety later.
+
+In a large program, identifying whether multiple threads might access a given variable can be complicated. Fortunately, the same object-oriented techniques that help you write well-organized, maintainable classes¡ªsuch as encapsulation and data hiding¡ªcan also help you create thread-safe classes. The less code that has access to a particular variable, the easier it is to ensure that all of it uses the proper synchronization, and the easier it is to reason about the conditions under which a given variable might be accessed. The Java language doesn¡¯t force you to encapsulate state¡ªit is perfectly allowable to store state in public fields (even public static fields) or publish a reference to an otherwise internal object¡ªbut the better encapsulated your program state, the easier it is to make your program thread-safe and to help maintainers keep it that way.
+
+When designing thread-safe classes, good object-oriented techniques¡ªencapsulation, immutability, and clear specification of invariants¡ªare your best friends.
+
+
+There will be times when good object-oriented design techniques are at odds with real-world requirements; it may be necessary in these cases to compromise the rules of good design for the sake of performance or for the sake of backward compatibility with legacy code. Sometimes abstraction and encapsulation are at odds with performance¡ªalthough not nearly as often as many developers believe¡ªbut it is always a good practice first to make your code right, and then make it fast. Even then, pursue optimization only if your performance measurements and requirements tell you that you must, and if those same measurements tell you that your optimizations actually made a difference under realistic conditions. [1]
+
+[1] In concurrent code, this practice should be adhered to even more than usual. Because concurrency bugs are so difficult to reproduce and debug, the benefit of a small performance gain on some infrequently used code path may well be dwarfed by the risk that the program will fail in the field.
+
+If you decide that you simply must break encapsulation, all is not lost. It is still possible to make your program thread-safe, it is just a lot harder. Moreover, the thread safety of your program will be more fragile, increasing not only development cost and risk but maintenance cost and risk as well. Chapter 4 characterizes the conditions under which it is safe to relax encapsulation of state variables.
+
+We¡¯ve used the terms ¡°thread-safe class¡± and ¡°thread-safe program¡± nearly interchangeably thus far. Is a thread-safe program one that is constructed entirely of thread-safe classes? Not necessarily¡ªa program that consists entirely of thread-safe classes may not be thread-safe, and a thread-safe program may contain classes that are not thread-safe. The issues surrounding the composition of thread-safe classes are also taken up in Chapter 4. In any case, the concept of a thread-safe class makes sense only if the class encapsulates its own state. Thread safety may be a term that is applied to code, but it is about state, and it can only be applied to the entire body of code that encapsulates its state, which may be an object or an entire program.
+
+2.1. What is Thread Safety?
+
+Defining thread safety is surprisingly tricky. The more formal attempts are so complicated as to offer little practical guidance or intuitive understanding, and the rest are informal descriptions that can seem downright circular. A quick Google search turns up numerous ¡°definitions¡± like these:
+
+. . . can be called from multiple program threads without unwanted interactions between the threads.
+
+. . .may be called by more than one thread at a time without requiring any other action on the caller¡¯s part.
+
+Given definitions like these, it¡¯s no wonder we find thread safety confusing! They sound suspiciously like ¡°a class is thread-safe if it can be used safely from multiple threads.¡± You can¡¯t really argue with such a statement, but it doesn¡¯t offer much practical help either. How do we tell a thread-safe class from an unsafe one? What do we even mean by ¡°safe¡±?
+
+At the heart of any reasonable definition of thread safety is the concept of correctness. If our definition of thread safety is fuzzy, it is because we lack a clear definition of correctness.
+
+Correctness means that a class conforms to its specification. A good specification defines invariants constraining an object¡¯s state and postconditions describing the effects of its operations. Since we often don¡¯t write adequate specifications for our classes, how can we possibly know they are correct? We can¡¯t, but that doesn¡¯t stop us from using them anyway once we¡¯ve convinced ourselves that ¡°the code works¡±. This ¡°code confidence¡± is about as close as many of us get to correctness, so let¡¯s just assume that single-threaded correctness is something that ¡°we know it when we see it¡±. Having optimistically defined ¡°correctness¡± as something that can be recognized, we can now define thread safety in a somewhat less circular way: a class is thread-safe when it continues to behave correctly when accessed from multiple threads.
+
+A class is thread-safe if it behaves correctly when accessed from multiple threads, regardless of the scheduling or interleaving of the execution of those threads by the runtime environment, and with no additional synchronization or other coordination on the part of the calling code.
+
+
+Since any single-threaded program is also a valid multithreaded program, it cannot be thread-safe if it is not even correct in a single-threaded environment. [2] If an object is correctly implemented, no sequence of operations¡ªcalls to public methods and reads or writes of public fields¡ªshould be able to violate any of its invariants or postconditions. No set of operations performed sequentially or concurrently on instances of a thread-safe class can cause an instance to be in an invalid state.
+
+[2] If the loose use of ¡°correctness¡± here bothers you, you may prefer to think of a thread-safe class as one that is no more broken in a concurrent environment than in a single-threaded environment.
+
+Thread-safe classes encapsulate any needed synchronization so that clients need not provide their own.
+
+
+2.1.1. Example: A Stateless Servlet
+
+In Chapter 1, we listed a number of frameworks that create threads and call your components from those threads, leaving you with the responsibility of making your components thread-safe. Very often, thread-safety requirements stem not from a decision to use threads directly but from a decision to use a facility like the Servlets framework. We¡¯re going to develop a simple example¡ªa servlet-based factorization service¡ªand slowly extend it to add features while preserving its thread safety.
+
+Listing 2.1 shows our simple factorization servlet. It unpacks the number to be factored from the servlet request, factors it, and packages the results into the servlet response.
+
+Listing 2.1. A Stateless Servlet.
+
+@ThreadSafe
+public class StatelessFactorizer implements Servlet {
+    public void service(ServletRequest req, ServletResponse resp) {
+        BigInteger i = extractFromRequest(req);
+        BigInteger[] factors = factor(i);
+        encodeIntoResponse(resp, factors);
+    }
+}
+
+StatelessFactorizer is, like most servlets, stateless: it has no fields and references no fields from other classes. The transient state for a particular computation exists solely in local variables that are stored on the thread¡¯s stack and are accessible only to the executing thread. One thread accessing a StatelessFactorizer cannot influence the result of another thread accessing the same StatelessFactorizer; because the two threads do not share state, it is as if they were accessing different instances. Since the actions of a thread accessing a stateless object cannot affect the correctness of operations in other threads, stateless objects are thread-safe.
+
+Stateless objects are always thread-safe.
+
+
+The fact that most servlets can be implemented with no state greatly reduces the burden of making servlets thread-safe. It is only when servlets want to remember things from one request to another that the thread safety requirement becomes an issue.
+
