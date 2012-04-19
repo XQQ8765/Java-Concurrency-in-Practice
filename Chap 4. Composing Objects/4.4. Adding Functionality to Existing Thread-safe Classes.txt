@@ -1,0 +1,102 @@
+4.4. Adding Functionality to Existing Thread-safe Classes
+
+The Java class library contains many useful ¡°building block¡± classes. Reusing existing classes is often preferable to creating new ones: reuse can reduce development effort, development risk (because the existing components are already tested), and maintenance cost. Sometimes a thread-safe class that supports all of the operations we want already exists, but often the best we can find is a class that supports almost all the operations we want, and then we need to add a new operation to it without undermining its thread safety.
+
+As an example, let¡¯s say we need a thread-safe List with an atomic put-ifabsent operation. The synchronized List implementations nearly do the job, since they provide the contains and add methods from which we can construct a put-if-absent operation.
+
+The concept of put-if-absent is straightforward enough¡ªcheck to see if an element is in the collection before adding it, and do not add it if it is already there. (Your ¡°check-then-act¡± warning bells should be going off now.) The requirement that the class be thread-safe implicitly adds another requirement¡ªthat operations like put-if-absent be atomic. Any reasonable interpretation suggests that, if you take a List that does not contain object X, and add X twice with put-if-absent, the resulting collection contains only one copy of X. But, if put-if-absent were not atomic, with some unlucky timing two threads could both see that X was not present and both add X, resulting in two copies of X.
+
+The safest way to add a new atomic operation is to modify the original class to support the desired operation, but this is not always possible because you may not have access to the source code or may not be free to modify it. If you can modify the original class, you need to understand the implementation¡¯s synchronization policy so that you can enhance it in a manner consistent with its original design. Adding the new method directly to the class means that all the code that implements the synchronization policy for that class is still contained in one source file, facilitating easier comprehension and maintenance.
+
+Another approach is to extend the class, assuming it was designed for extension. BetterVector in Listing 4.13 extends Vector to add a putIfAbsent method. Extending Vector is straightforward enough, but not all classes expose enough of their state to subclasses to admit this approach.
+
+Extension is more fragile than adding code directly to a class, because the implementation of the synchronization policy is now distributed over multiple, separately maintained source files. If the underlying class were to change its synchronization policy by choosing a different lock to guard its state variables, the subclass would subtly and silently break, because it no longer used the right lock to control concurrent access to the base class¡¯s state. (The synchronization policy of Vector is fixed by its specification, so BetterVector would not suffer from this problem.)
+
+Listing 4.13. Extending Vector to have a Put-if-absent Method.
+
+@ThreadSafe
+public class BetterVector<E> extends Vector<E> {
+    public synchronized boolean putIfAbsent(E x) {
+        boolean absent = !contains(x);
+        if (absent)
+            add(x);
+        return absent;
+    }
+}
+
+4.4.1. Client-side Locking
+
+For an ArrayList wrapped with a Collections.synchronizedList wrapper, neither of these approaches¡ªadding a method to the original class or extending the class¡ªworks because the client code does not even know the class of the List object returned from the synchronized wrapper factories. A third strategy is to extend the functionality of the class without extending the class itself by placing extension code in a ¡°helper¡± class.
+
+Listing 4.14 shows a failed attempt to create a helper class with an atomic put-if-absent operation for operating on a thread-safe List.
+
+Listing 4.14. Non-thread-safe Attempt to Implement Put-if-absent. Don¡¯t Do this.
+
+
+@NotThreadSafe
+public class ListHelper<E> {
+    public List<E> list =
+        Collections.synchronizedList(new ArrayList<E>());
+    ...
+    public synchronized boolean putIfAbsent(E x) {
+        boolean absent = !list.contains(x);
+        if (absent)
+            list.add(x);
+        return absent;
+    }
+}
+
+Why wouldn¡¯t this work? After all, putIfAbsent is synchronized, right? The problem is that it synchronizes on the wrong lock. Whatever lock the List uses to guard its state, it sure isn¡¯t the lock on the ListHelper. ListHelper provides only the illusion of synchronization; the various list operations, while all synchronized, use different locks, which means that putIfAbsent is not atomic relative to other operations on the List. So there is no guarantee that another thread won¡¯t modify the list while putIfAbsent is executing.
+
+To make this approach work, we have to use the same lock that the List uses by using client-side locking or external locking. Client-side locking entails guarding client code that uses some object X with the lock X uses to guard its own state. In order to use client-side locking, you must know what lock X uses.
+
+The documentation for Vector and the synchronized wrapper classes states, albeit obliquely, that they support client-side locking, by using the intrinsic lock for the Vector or the wrapper collection (not the wrapped collection). Listing 4.15 shows a putIfAbsent operation on a thread-safe List that correctly uses client-side locking.
+
+Listing 4.15. Implementing Put-if-absent with Client-side Locking.
+
+@ThreadSafe
+public class ListHelper<E> {
+    public List<E> list =
+        Collections.synchronizedList(new ArrayList<E>());
+    ...
+    public boolean putIfAbsent(E x) {
+        synchronized (list)  {
+            boolean absent = !list.contains(x);
+            if (absent)
+                list.add(x);
+            return absent;
+        }
+    }
+}
+
+If extending a class to add another atomic operation is fragile because it distributes the locking code for a class over multiple classes in an object hierarchy, client-side locking is even more fragile because it entails putting locking code for class C into classes that are totally unrelated to C. Exercise care when using client-side locking on classes that do not commit to their locking strategy.
+
+Client-side locking has a lot in common with class extension¡ªthey both couple the behavior of the derived class to the implementation of the base class. Just as extension violates encapsulation of implementation [EJ Item 14], client-side locking violates encapsulation of synchronization policy.
+
+4.4.2. Composition
+
+There is a less fragile alternative for adding an atomic operation to an existing class: composition. ImprovedList in Listing 4.16 implements the List operations by delegating them to an underlying List instance, and adds an atomic putIfAbsent method. (Like Collections.synchronizedList and other collections wrappers, ImprovedList assumes that once a list is passed to its constructor, the client will not use the underlying list directly again, accessing it only through the ImprovedList.)
+
+Listing 4.16. Implementing Put-if-absent Using Composition.
+
+@ThreadSafe
+public class ImprovedList<T> implements List<T> {
+    private final List<T> list;
+
+    public ImprovedList(List<T> list) { this.list = list; }
+
+    public synchronized boolean putIfAbsent(T x) {
+        boolean contains = list.contains(x);
+        if (contains)
+            list.add(x);
+        return !contains;
+    }
+
+    public synchronized void clear() { list.clear(); }
+    // ... similarly delegate other List methods
+}
+
+ImprovedList adds an additional level of locking using its own intrinsic lock. It does not care whether the underlying List is thread-safe, because it provides its own consistent locking that provides thread safety even if the List is not thread-safe or changes its locking implementation. While the extra layer of synchronization may add some small performance penalty,[7] the implementation in ImprovedList is less fragile than attempting to mimic the locking strategy of another object. In effect, we¡¯ve used the Java monitor pattern to encapsulate an existing List, and this is guaranteed to provide thread safety so long as our class holds the only outstanding reference to the underlying List.
+
+[7] The penalty will be small because the synchronization on the underlying List is guaranteed to be uncontended and therefore fast; see Chapter 11.
+

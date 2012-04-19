@@ -1,0 +1,94 @@
+4.2. Instance Confinement
+
+If an object is not thread-safe, several techniques can still let it be used safely in a multithreaded program. You can ensure that it is only accessed from a single thread (thread confinement), or that all access to it is properly guarded by a lock.
+
+Encapsulation simplifies making classes thread-safe by promoting instance confinement, often just called confinement [CPJ 2.3.3]. When an object is encapsulated within another object, all code paths that have access to the encapsulated object are known and can be therefore be analyzed more easily than if that object were accessible to the entire program. Combining confinement with an appropriate locking discipline can ensure that otherwise non-thread-safe objects are used in a thread-safe manner.
+
+Encapsulating data within an object confines access to the data to the object¡¯s methods, making it easier to ensure that the data is always accessed with the appropriate lock held.
+
+
+Confined objects must not escape their intended scope. An object may be confined to a class instance (such as a private class member), a lexical scope (such as a local variable), or a thread (such as an object that is passed from method to method within a thread, but not supposed to be shared across threads). Objects don¡¯t escape on their own, of course¡ªthey need help from the developer, who assists by publishing the object beyond its intended scope.
+
+PersonSet in Listing 4.2 illustrates how confinement and locking can work together to make a class thread-safe even when its component state variables are not. The state of PersonSet is managed by a HashSet, which is not thread-safe. But because mySet is private and not allowed to escape, the HashSet is confined to the PersonSet. The only code paths that can access mySet are addPerson and containsPerson, and each of these acquires the lock on the PersonSet. All its state is guarded by its intrinsic lock, making PersonSet thread-safe.
+
+Listing 4.2. Using Confinement to Ensure Thread Safety.
+
+@ThreadSafe
+public class PersonSet {
+    @GuardedBy("this")
+    private final Set<Person> mySet = new HashSet<Person>();
+
+    public synchronized void addPerson(Person p) {
+        mySet.add(p);
+    }
+
+    public synchronized boolean containsPerson(Person p) {
+        return mySet.contains(p);
+    }
+}
+
+This example makes no assumptions about the thread-safety of Person, but if it is mutable, additional synchronization will be needed when accessing a Person retrieved from a PersonSet. The most reliable way to do this would be to make Person thread-safe; less reliable would be to guard the Person objects with a lock and ensure that all clients follow the protocol of acquiring the appropriate lock before accessing the Person.
+
+Instance confinement is one of the easiest ways to build thread-safe classes. It also allows flexibility in the choice of locking strategy; PersonSet happened to use its own intrinsic lock to guard its state, but any lock, consistently used, would do just as well. Instance confinement also allows different state variables to be guarded by different locks. (For an example of a class that uses multiple lock objects to guard its state, see ServerStatus on 236.)
+
+There are many examples of confinement in the platform class libraries, including some classes that exist solely to turn non-thread-safe classes into threadsafe ones. The basic collection classes such as ArrayList and HashMap are not thread-safe, but the class library provides wrapper factory methods (Collections.synchronizedList and friends) so they can be used safely in multithreaded environments. These factories use the Decorator pattern (Gamma et al., 1995) to wrap the collection with a synchronized wrapper object; the wrapper implements each method of the appropriate interface as a synchronized method that forwards the request to the underlying collection object. So long as the wrapper object holds the only reachable reference to the underlying collection (i.e., the underlying collection is confined to the wrapper), the wrapper object is then thread-safe. The Javadoc for these methods warns that all access to the underlying collection must be made through the wrapper.
+
+Of course, it is still possible to violate confinement by publishing a supposedly confined object; if an object is intended to be confined to a specific scope, then letting it escape from that scope is a bug. Confined objects can also escape by publishing other objects such as iterators or inner class instances that may indirectly publish the confined objects.
+
+Confinement makes it easier to build thread-safe classes because a class that confines its state can be analyzed for thread safety without having to examine the whole program.
+
+
+4.2.1. The Java Monitor Pattern
+
+Following the principle of instance confinement to its logical conclusion leads you to the Java monitor pattern.[2] An object following the Java monitor pattern encapsulates all its mutable state and guards it with the object¡¯s own intrinsic lock.
+
+[2] The Java monitor pattern is inspired by Hoare¡¯s work on monitors (Hoare, 1974), though there are significant differences between this pattern and a true monitor. The bytecode instructions for entering and exiting a synchronized block are even called monitorenter and monitorexit, and Java¡¯s built-in (intrinsic) locks are sometimes called monitor locks or monitors.
+
+Counter in Listing 4.1 shows a typical example of this pattern. It encapsulates one state variable, value, and all access to that state variable is through the methods of Counter, which are all synchronized.
+
+The Java monitor pattern is used by many library classes, such as Vector and Hashtable. Sometimes a more sophisticated synchronization policy is needed; Chapter 11 shows how to improve scalability through finer-grained locking strategies. The primary advantage of the Java monitor pattern is its simplicity.
+
+The Java monitor pattern is merely a convention; any lock object could be used to guard an object¡¯s state so long as it is used consistently. Listing 4.3 illustrates a class that uses a private lock to guard its state.
+
+Listing 4.3. Guarding State with a Private Lock.
+
+public class PrivateLock {
+    private final Object myLock = new Object();
+    @GuardedBy("myLock") Widget widget;
+
+    void someMethod() {
+        synchronized(myLock) {
+            // Access or modify the state of widget
+        }
+    }
+}
+
+There are advantages to using a private lock object instead of an object¡¯s intrinsic lock (or any other publicly accessible lock). Making the lock object private encapsulates the lock so that client code cannot acquire it, whereas a publicly accessible lock allows client code to participate in its synchronization policy¡ªcorrectly or incorrectly. Clients that improperly acquire another object¡¯s lock could cause liveness problems, and verifying that a publicly accessible lock is properly used requires examining the entire program rather than a single class.
+
+4.2.2. Example: Tracking Fleet Vehicles
+
+Counter in Listing 4.1 is a concise, but trivial, example of the Java monitor pattern. Let¡¯s build a slightly less trivial example: a ¡°vehicle tracker¡± for dispatching fleet vehicles such as taxicabs, police cars, or delivery trucks. We¡¯ll build it first using the monitor pattern, and then see how to relax some of the encapsulation requirements while retaining thread safety.
+
+Each vehicle is identified by a String and has a location represented by (x, y) coordinates. The VehicleTracker classes encapsulate the identity and locations of the known vehicles, making them well-suited as a data model in a modelview-controller GUI application where it might be shared by a view thread and multiple updater threads. The view thread would fetch the names and locations of the vehicles and render them on a display:
+
+Map<String, Point> locations = vehicles.getLocations();
+for (String key : locations.keySet())
+    renderVehicle(key, locations.get(key));
+
+Similarly, the updater threads would modify vehicle locations with data received from GPS devices or entered manually by a dispatcher through a GUI interface:
+
+void vehicleMoved(VehicleMovedEvent evt) {
+    Point loc = evt.getNewLocation();
+    vehicles.setLocation(evt.getVehicleId(), loc.x, loc.y);
+}
+
+Since the view thread and the updater threads will access the data model concurrently, it must be thread-safe. Listing 4.4 shows an implementation of the vehicle tracker using the Java monitor pattern that uses MutablePoint in Listing 4.5 for representing the vehicle locations.
+
+Even though MutablePoint is not thread-safe, the tracker class is. Neither the map nor any of the mutable points it contains is ever published. When we need to a return vehicle locations to callers, the appropriate values are copied using either the MutablePoint copy constructor or deepCopy, which creates a new Map whose values are copies of the keys and values from the old Map.[3]
+
+[3] Note that deepCopy can¡¯t just wrap the Map with an unmodifiableMap, because that protects only the collection from modification; it does not prevent callers from modifying the mutable objects stored in it. For the same reason, populating the HashMap in deepCopy via a copy constructor wouldn¡¯t work either, because only the references to the points would be copied, not the point objects themselves.
+
+This implementation maintains thread safety in part by copying mutable data before returning it to the client. This is usually not a performance issue, but could become one if the set of vehicles is very large.[4] Another consequence of copying the data on each call to getLocation is that the contents of the returned collection do not change even if the underlying locations change. Whether this is good or bad depends on your requirements. It could be a benefit if there are internal consistency requirements on the location set, in which case returning a consistent snapshot is critical, or a drawback if callers require up-to-date information for each vehicle and therefore need to refresh their snapshot more often.
+
+[4] BecausedeepCopy is called from a synchronized method, the tracker¡¯s intrinsic lock is held for the duration of what might be a long-running copy operation, and this could degrade the responsiveness of the user interface when many vehicles are being tracked.
+

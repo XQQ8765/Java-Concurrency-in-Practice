@@ -1,0 +1,139 @@
+Chapter 3. Sharing Objects
+
+We stated at the beginning of Chapter 2 that writing correct concurrent programs is primarily about managing access to shared, mutable state. That chapter was about using synchronization to prevent multiple threads from accessing the same data at the same time; this chapter examines techniques for sharing and publishing objects so they can be safely accessed by multiple threads. Together, they lay the foundation for building thread-safe classes and safely structuring concurrent applications using the java.util.concurrent library classes.
+
+We have seen how synchronized blocks and methods can ensure that operations execute atomically, but it is a common misconception that synchronized is only about atomicity or demarcating ¡°critical sections¡±. Synchronization also has another significant, and subtle, aspect: memory visibility. We want not only to prevent one thread from modifying the state of an object when another is using it, but also to ensure that when a thread modifies the state of an object, other threads can actually see the changes that were made. But without synchronization, this may not happen. You can ensure that objects are published safely either by using explicit synchronization or by taking advantage of the synchronization built into library classes.
+
+3.1. Visibility
+
+Visibility is subtle because the things that can go wrong are so counterintuitive. In a single-threaded environment, if you write a value to a variable and later read that variable with no intervening writes, you can expect to get the same value back. This seems only natural. It may be hard to accept at first, but when the reads and writes occur in different threads, this is simply not the case. In general, there is no guarantee that the reading thread will see a value written by another thread on a timely basis, or even at all. In order to ensure visibility of memory writes across threads, you must use synchronization.
+
+NoVisibility in Listing 3.1 illustrates what can go wrong when threads share data without synchronization. Two threads, the main thread and the reader thread, access the shared variables ready and number. The main thread starts the reader thread and then sets number to 42 and ready to true. The reader thread spins until it sees ready is true, and then prints out number. While it may seem obvious that NoVisibility will print 42, it is in fact possible that it will print zero, or never terminate at all! Because it does not use adequate synchronization, there is no guarantee that the values of ready and number written by the main thread will be visible to the reader thread.
+
+Listing 3.1. Sharing Variables without Synchronization. Don¡¯t Do this.
+
+
+public class NoVisibility {
+    private static boolean ready;
+    private static int number;
+
+    private static class ReaderThread extends Thread {
+        public void run() {
+            while (!ready)
+                Thread.yield();
+            System.out.println(number);
+        }
+    }
+
+    public static void main(String[] args) {
+        new ReaderThread().start();
+        number = 42;
+        ready = true;
+    }
+}
+
+NoVisibility could loop forever because the value of ready might never become visible to the reader thread. Even more strangely, NoVisibility could print zero because the write to ready might be made visible to the reader thread before the write to number, a phenomenon known as reordering. There is no guarantee that operations in one thread will be performed in the order given by the program, as long as the reordering is not detectable from within that thread¡ªeven if the reordering is apparent to other threads.[1] When the main thread writes first to number and then to ready without synchronization, the reader thread could see those writes happen in the opposite order¡ªor not at all.
+
+[1] This may seem like a broken design, but it is meant to allow JVMs to take full advantage of the performance of modern multiprocessor hardware. For example, in the absence of synchronization, the Java Memory Model permits the compiler to reorder operations and cache values in registers, and permits CPUs to reorder operations and cache values in processor-specific caches. For more details, see Chapter 16.
+
+In the absence of synchronization, the compiler, processor, and runtime can do some downright weird things to the order in which operations appear to execute. Attempts to reason about the order in which memory actions ¡°must¡± happen in insufflciently synchronized multithreaded programs will almost certainly be incorrect.
+
+
+NoVisibility is about as simple as a concurrent program can get¡ªtwo threads and two shared variables¡ªand yet it is still all too easy to come to the wrong conclusions about what it does or even whether it will terminate. Reasoning about insufficiently synchronized concurrent programs is prohibitively difficult.
+
+This may all sound a little scary, and it should. Fortunately, there¡¯s an easy way to avoid these complex issues: always use the proper synchronization whenever data is shared across threads.
+
+3.1.1. Stale Data
+
+NoVisibility demonstrated one of the ways that insufficiently synchronized programs can cause surprising results: stale data. When the reader thread examines ready, it may see an out-of-date value. Unless synchronization is used every time a variable is accessed, it is possible to see a stale value for that variable. Worse, staleness is not all-or-nothing: a thread can see an up-to-date value of one variable but a stale value of another variable that was written first.
+
+When food is stale, it is usually still edible¡ªjust less enjoyable. But stale data can be more dangerous. While an out-of-date hit counter in a web application might not be so bad,[2] stale values can cause serious safety or liveness failures. In NoVisibility, stale values could cause it to print the wrong value or prevent the program from terminating. Things can get even more complicated with stale values of object references, such as the link pointers in a linked list implementation. Stale data can cause serious and confusing failures such as unexpected exceptions, corrupted data structures, inaccurate computations, and infinite loops.
+
+[2] Reading data without synchronization is analogous to using the READ_UNCOMMITTED isolation level in a database, where you are willing to trade accuracy for performance. However, in the case of unsynchronized reads, you are trading away a greater degree of accuracy, since the visible value for a shared variable can be arbitrarily stale.
+
+MutableInteger in Listing 3.2 is not thread-safe because the value field is accessed from both get and set without synchronization. Among other hazards, it is susceptible to stale values: if one thread calls set, other threads calling get may or may not see that update.
+
+We can make MutableInteger thread safe by synchronizing the getter and setter as shown in SynchronizedInteger in Listing 3.3. Synchronizing only the setter would not be sufficient: threads calling get would still be able to see stale values.
+
+Listing 3.2. Non-thread-safe Mutable Integer Holder.
+
+
+@NotThreadSafe
+public class MutableInteger {
+    private int value;
+
+    public int  get() { return value; }
+    public void set(int value) { this.value = value; }
+}
+
+Listing 3.3. Thread-safe Mutable Integer Holder.
+
+@ThreadSafe
+public class SynchronizedInteger {
+    @GuardedBy("this") private int value;
+
+    public synchronized int get() { return value; }
+    public synchronized void set(int value) { this.value = value; }
+}
+
+3.1.2. Nonatomic 64-bit Operations
+
+When a thread reads a variable without synchronization, it may see a stale value, but at least it sees a value that was actually placed there by some thread rather than some random value. This safety guarantee is called out-of-thin-air safety.
+
+Out-of-thin-air safety applies to all variables, with one exception: 64-bit numeric variables (double and long) that are not declared volatile (see Section 3.1.4). The Java Memory Model requires fetch and store operations to be atomic, but for nonvolatile long and double variables, the JVM is permitted to treat a 64-bit read or write as two separate 32-bit operations. If the reads and writes occur in different threads, it is therefore possible to read a nonvolatile long and get back the high 32 bits of one value and the low 32 bits of another.[3] Thus, even if you don¡¯t care about stale values, it is not safe to use shared mutable long and double variables in multithreaded programs unless they are declared volatile or guarded by a lock.
+
+[3] When the Java Virtual Machine Specification was written, many widely used processor architectures could not efficiently provide atomic 64-bit arithmetic operations.
+
+3.1.3. Locking and Visibility
+
+Intrinsic locking can be used to guarantee that one thread sees the effects of another in a predictable manner, as illustrated by Figure 3.1. When thread A executes a synchronized block, and subsequently thread B enters a synchronized block guarded by the same lock, the values of variables that were visible to A prior to releasing the lock are guaranteed to be visible to B upon acquiring thelock. In other words, everything A did in or prior to a synchronized block is visible to B when it executes a synchronized block guarded by the same lock. Without synchronization, there is no such guarantee.
+
+Figure 3.1. Visibility Guarantees for Synchronization.
+
+
+
+
+We can now give the other reason for the rule requiring all threads to synchronize on the same lock when accessing a shared mutable variable¡ªto guarantee that values written by one thread are made visible to other threads. Otherwise, if a thread reads a variable without holding the appropriate lock, it might see a stale value.
+
+Locking is not just about mutual exclusion; it is also about memory visibility. To ensure that all threads see the most up-to-date values of shared mutable variables, the reading and writing threads must synchronize on a common lock.
+
+
+3.1.4. Volatile Variables
+
+The Java language also provides an alternative, weaker form of synchronization, volatile variables, to ensure that updates to a variable are propagated predictably to other threads. When a field is declared volatile, the compiler and runtime are put on notice that this variable is shared and that operations on it should not be reordered with other memory operations. Volatile variables are not cached in registers or in caches where they are hidden from other processors, so a read of a volatile variable always returns the most recent write by any thread.
+
+A good way to think about volatile variables is to imagine that they behave roughly like the SynchronizedInteger class in Listing 3.3, replacing reads and writes of the volatile variable with calls to get and set.[4] Yet accessing a volatile variable performs no locking and so cannot cause the executing thread to block, making volatile variables a lighter-weight synchronization mechanism than synchronized.[5]
+
+[4] This analogy is not exact; the memory visibility effects of SynchronizedInteger are actually slightly stronger than those of volatile variables. See Chapter 16.
+
+[5] Volatile reads are only slightly more expensive than nonvolatile reads on most current processor architectures.
+
+The visibility effects of volatile variables extend beyond the value of the volatile variable itself. When thread A writes to a volatile variable and subsequently thread B reads that same variable, the values of all variables that were visible to A prior to writing to the volatile variable become visible to B after reading the volatile variable. So from a memory visibility perspective, writing a volatile variable is like exiting a synchronized block and reading a volatile variable is like entering a synchronized block. However, we do not recommend relying too heavily on volatile variables for visibility; code that relies on volatile variables for visibility of arbitrary state is more fragile and harder to understand than code that uses locking.
+
+Use volatile variables only when they simplify implementing and verifying your synchronization policy; avoid using volatile variables when veryfing correctness would require subtle reasoning about visibility. Good uses of volatile variables include ensuring the visibility of their own state, that of the object they refer to, or indicating that an important lifecycle event (such as initialization or shutdown) has occurred.
+
+
+Listing 3.4 illustrates a typical use of volatile variables: checking a status flag to determine when to exit a loop. In this example, our anthropomorphized thread is trying to get to sleep by the time-honored method of counting sheep. For this example to work, the asleep flag must be volatile. Otherwise, the thread might not notice when asleep has been set by another thread.[6] We could instead have used locking to ensure visibility of changes to asleep, but that would have made the code more cumbersome.
+
+[6] Debugging tip: For server applications, be sure to always specify the -server JVM command line switch when invoking the JVM, even for development and testing. The server JVM performs more optimization than the client JVM, such as hoisting variables out of a loop that are not modified in the loop; code that might appear to work in the development environment (client JVM) can break in the deployment environment (server JVM). For example, had we ¡°forgotten¡± to declare the variable asleep as volatile in Listing 3.4, the server JVM could hoist the test out of the loop (turning it into an infinite loop), but the client JVM would not. An infinite loop that shows up in development is far less costly than one that only shows up in production.
+
+Listing 3.4. Counting Sheep.
+
+volatile boolean asleep;
+...
+    while (!asleep)
+        countSomeSheep();
+
+Volatile variables are convenient, but they have limitations. The most common use for volatile variables is as a completion, interruption, or status flag, such as the asleep flag in Listing 3.4. Volatile variables can be used for other kinds of state information, but more care is required when attempting this. For example, the semantics of volatile are not strong enough to make the increment operation (count++) atomic, unless you can guarantee that the variable is written only from a single thread. (Atomic variables do provide atomic read-modify-write support and can often be used as ¡°better volatile variables¡±; see Chapter 15.)
+
+Locking can guarantee both visibility and atomicity; volatile variables can only guarantee visibility.
+
+
+You can use volatile variables only when all the following criteria are met:
+
+Writes to the variable do not depend on its current value, or you can ensure that only a single thread ever updates the value;
+
+The variable does not participate in invariants with other state variables; and
+
+Locking is not required for any other reason while the variable is being accessed.
+

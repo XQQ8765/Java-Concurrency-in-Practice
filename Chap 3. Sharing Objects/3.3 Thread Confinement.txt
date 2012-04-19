@@ -1,0 +1,87 @@
+3.3. Thread Confinement
+
+Accessing shared, mutable data requires using synchronization; one way to avoid this requirement is to not share. If data is only accessed from a single thread, no synchronization is needed. This technique, thread confinement, is one of the simplest ways to achieve thread safety. When an object is confined to a thread, such usage is automatically thread-safe even if the confined object itself is not [CPJ 2.3.2].
+
+Swing uses thread confinement extensively. The Swing visual components and data model objects are not thread safe; instead, safety is achieved by confining them to the Swing event dispatch thread. To use Swing properly, code running in threads other than the event thread should not access these objects. (To make this easier, Swing provides the invokeLater mechanism to schedule a Runnable for execution in the event thread.) Many concurrency errors in Swing applications stem from improper use of these confined objects from another thread.
+
+Another common application of thread confinement is the use of pooled JDBC (Java Database Connectivity) Connection objects. The JDBC specification does not require that Connection objects be thread-safe.[9] In typical server applications, a thread acquires a connection from the pool, uses it for processing a single request, and returns it. Since most requests, such as servlet requests or EJB (Enterprise JavaBeans) calls, are processed synchronously by a single thread, and the pool will not dispense the same connection to another thread until it has been returned, this pattern of connection management implicitly confines the Connection to that thread for the duration of the request.
+
+[9] The connection pool implementations provided by application servers are thread-safe; connection pools are necessarily accessed from multiple threads, so a non-thread-safe implementation would not make sense.
+
+Just as the language has no mechanism for enforcing that a variable is guarded by a lock, it has no means of confining an object to a thread. Thread confinement is an element of your program¡¯s design that must be enforced by its implementation. The language and core libraries provide mechanisms that can help in maintaining thread confinement¡ªlocal variables and the ThreadLocal class¡ªbut even with these, it is still the programmer¡¯s responsibility to ensure that thread-confined objects do not escape from their intended thread.
+
+3.3.1. Ad-hoc Thread Confinement
+
+Ad-hoc thread confinement describes when the responsibility for maintaining thread confinement falls entirely on the implementation. Ad-hoc thread confinement can be fragile because none of the language features, such as visibility modifiers or local variables, helps confine the object to the target thread. In fact, references to thread-confined objects such as visual components or data models in GUI applications are often held in public fields.
+
+The decision to use thread confinement is often a consequence of the decision to implement a particular subsystem, such as the GUI, as a single-threaded subsystem. Single-threaded subsystems can sometimes offer a simplicity benefit that outweighs the fragility of ad-hoc thread confinement.[10]
+
+[10] Another reason to make a subsystem single-threaded is deadlock avoidance; this is one of the primary reasons most GUI frameworks are single-threaded. Single-threaded subsystems are covered in Chapter 9.
+
+A special case of thread confinement applies to volatile variables. It is safe to perform read-modify-write operations on shared volatile variables as long as you ensure that the volatile variable is only written from a single thread. In this case, you are confining the modification to a single thread to prevent race conditions, and the visibility guarantees for volatile variables ensure that other threads see the most up-to-date value.
+
+Because of its fragility, ad-hoc thread confinement should be used sparingly; if possible, use one of the stronger forms of thread confinment (stack confinement or ThreadLocal) instead.
+
+3.3.2. Stack Confinement
+
+Stack confinement is a special case of thread confinement in which an object can only be reached through local variables. Just as encapsulation can make it easier to preserve invariants, local variables can make it easier to confine objects to a thread. Local variables are intrinsically confined to the executing thread; they exist on the executing thread¡¯s stack, which is not accessible to other threads. Stack confinement (also called within-thread or thread-local usage, but not to be confused with the ThreadLocal library class) is simpler to maintain and less fragile than ad-hoc thread confinement.
+
+For primitively typed local variables, such as numPairs in loadTheArk in Listing 3.9, you cannot violate stack confinement even if you tried. There is no way to obtain a reference to a primitive variable, so the language semantics ensure that primitive local variables are always stack confined.
+
+Listing 3.9. Thread Confinement of Local Primitive and Reference Variables.
+
+public int loadTheArk(Collection<Animal> candidates) {
+    SortedSet<Animal> animals;
+    int numPairs = 0;
+    Animal candidate = null;
+
+    // animals confined to method, don't let them escape!
+    animals = new TreeSet<Animal>(new SpeciesGenderComparator());
+    animals.addAll(candidates);
+    for (Animal a : animals) {
+        if (candidate == null || !candidate.isPotentialMate(a))
+            candidate = a;
+        else {
+            ark.load(new AnimalPair(candidate, a));
+            ++numPairs;
+            candidate = null;
+        }
+    }
+    return numPairs;
+}
+
+Maintaining stack confinement for object references requires a little more assistance from the programmer to ensure that the referent does not escape. In loadTheArk, we instantiate a TreeSet and store a reference to it in animals. At this point, there is exactly one reference to the Set, held in a local variable and therefore confined to the executing thread. However, if we were to publish a reference to the Set (or any of its internals), the confinement would be violated and the animals would escape.
+
+Using a non-thread-safe object in a within-thread context is still thread-safe. However, be careful: the design requirement that the object be confined to the executing thread, or the awareness that the confined object is not thread-safe, often exists only in the head of the developer when the code is written. If the assumption of within-thread usage is not clearly documented, future maintainers might mistakenly allow the object to escape.
+
+3.3.3. ThreadLocal
+
+A more formal means of maintaining thread confinement is ThreadLocal, which allows you to associate a per-thread value with a value-holding object. Thread-Local provides get and set accessormethods that maintain a separate copy of the value for each thread that uses it, so a get returns the most recent value passed to set from the currently executing thread.
+
+Thread-local variables are often used to prevent sharing in designs based on mutable Singletons or global variables. For example, a single-threaded application might maintain a global database connection that is initialized at startup to avoid having to pass a Connection to every method. Since JDBC connections may not be thread-safe, a multithreaded application that uses a global connection without additional coordination is not thread-safe either. By using a ThreadLocal to store the JDBC connection, as in ConnectionHolder in Listing 3.10, each thread will have its own connection.
+
+Listing 3.10. Using ThreadLocal to Ensure thread Confinement.
+
+private static ThreadLocal<Connection> connectionHolder
+    = new ThreadLocal<Connection>() {
+        public Connection initialValue() {
+            return DriverManager.getConnection(DB_URL);
+        }
+    };
+
+public static Connection getConnection() {
+    return connectionHolder.get();
+}
+
+This technique can also be used when a frequently used operation requires a temporary object such as a buffer and wants to avoid reallocating the temporary object on each invocation. For example, before Java 5.0, Integer.toString used a ThreadLocal to store the 12-byte buffer used for formatting its result, rather than using a shared static buffer (which would require locking) or allocating a new buffer for each invocation.[11]
+
+[11] This technique is unlikely to be a performance win unless the operation is performed very frequently or the allocation is unusually expensive. In Java 5.0, it was replaced with the more straightforward approach of allocating a new buffer for every invocation, suggesting that for something as mundane as a temporary buffer, it is not a performance win.
+
+When a thread calls ThreadLocal.get for the first time, initialValue is consulted to provide the initial value for that thread. Conceptually, you can think of a ThreadLocal<T> as holding a Map<Thread,T> that stores the thread-specific values, though this is not how it is actually implemented. The thread-specific values are stored in the Thread object itself; when the thread terminates, the thread-specific values can be garbage collected.
+
+If you are porting a single-threaded application to a multithreaded environment, you can preserve thread safety by converting shared global variables into ThreadLocals, if the semantics of the shared globals permits this; an applicationwide cache would not be as useful if it were turned into a number of thread-local caches.
+
+ThreadLocal is widely used in implementing application frameworks. For example, J2EE containers associate a transaction context with an executing thread for the duration of an EJB call. This is easily implemented using a static Thread-Local holding the transaction context: when framework code needs to determine what transaction is currently running, it fetches the transaction context from this ThreadLocal. This is convenient in that it reduces the need to pass execution context information into every method, but couples any code that uses this mechanism to the framework.
+
+It is easy to abuse ThreadLocal by treating its thread confinement property as a license to use global variables or as a means of creating ¡°hidden¡± method arguments. Like global variables, thread-local variables can detract from reusability and introduce hidden couplings among classes, and should therefore be used with care.
+

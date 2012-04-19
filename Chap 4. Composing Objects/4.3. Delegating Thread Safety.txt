@@ -1,0 +1,285 @@
+4.3. Delegating Thread Safety
+
+All but the most trivial objects are composite objects. The Java monitor pattern is useful when building classes from scratch or composing classes out of objects that are not thread-safe. But what if the components of our class are already thread-safe? Do we need to add an additional layer of thread safety? The answer is . . . ¡°it depends¡±. In some cases a composite made of thread-safe components is thread-safe (Listings 4.7 and 4.9), and in others it is merely a good start (4.10).
+
+In CountingFactorizer on page 23, we added an AtomicLong to an otherwise stateless object, and the resulting composite object was still thread-safe. Since the state of CountingFactorizer is the state of the thread-safe AtomicLong, and since CountingFactorizer imposes no additional validity constraints on the state of the counter, it is easy to see that CountingFactorizer is thread-safe. We could say that CountingFactorizer delegates its thread safety responsibilities to the AtomicLong: CountingFactorizer is thread-safe because AtomicLong is.[5]
+
+[5] If count were not final, the thread safety analysis of CountingFactorizer would be more complicated. If CountingFactorizer could modify count to reference a different AtomicLong, we would then have to ensure that this update was visible to all threads that might access the count, and that there were no race conditions regarding the value of the count reference. This is another good reason to use final fields wherever practical.
+
+Listing 4.4. Monitor-based Vehicle Tracker Implementation.
+
+Code View: Scroll / Show All
+@ThreadSafe
+public class MonitorVehicleTracker {
+    @GuardedBy("this")
+    private final Map<String, MutablePoint> locations;
+
+    public MonitorVehicleTracker(
+            Map<String, MutablePoint> locations) {
+        this.locations = deepCopy(locations);
+    }
+
+    public synchronized Map<String, MutablePoint> getLocations() {
+        return deepCopy(locations);
+    }
+
+    public synchronized  MutablePoint getLocation(String id) {
+        MutablePoint loc = locations.get(id);
+        return loc == null ? null : new MutablePoint(loc);
+    }
+
+    public synchronized  void setLocation(String id, int x, int y) {
+        MutablePoint loc = locations.get(id);
+        if (loc == null)
+            throw new IllegalArgumentException("No such ID: " + id);
+        loc.x = x;
+        loc.y = y;
+    }
+
+    private static Map<String, MutablePoint> deepCopy(
+            Map<String, MutablePoint> m) {
+        Map<String, MutablePoint> result =
+                new HashMap<String, MutablePoint>();
+        for (String id : m.keySet())
+            result.put(id, new MutablePoint(m.get(id)));
+        return Collections.unmodifiableMap(result);
+    }
+}
+
+public class MutablePoint { /*  Listing 4.5  */ }
+
+
+					  
+
+Listing 4.5. Mutable Point Class Similar to Java.awt.Point.
+
+
+@NotThreadSafe
+public class MutablePoint {
+    public int x, y;
+
+    public MutablePoint() { x = 0; y = 0; }
+    public MutablePoint(MutablePoint p) {
+        this.x = p.x;
+        this.y = p.y;
+    }
+}
+
+4.3.1. Example: Vehicle Tracker Using Delegation
+
+As a more substantial example of delegation, let¡¯s construct a version of the vehicle tracker that delegates to a thread-safe class. We store the locations in a Map, so we start with a thread-safe Map implementation, ConcurrentHashMap. We also store the location using an immutable Point class instead of MutablePoint, shown in Listing 4.6.
+
+Listing 4.6. Immutable Point class used by DelegatingVehicleTracker.
+
+@Immutable
+public class Point {
+    public final int x, y;
+
+    public Point(int x, int y) {
+        this.x = x;
+        this.y = y;
+    }
+}
+
+Point is thread-safe because it is immutable. Immutable values can be freely shared and published, so we no longer need to copy the locations when returning them.
+
+DelegatingVehicleTracker in Listing 4.7 does not use any explicit synchronization; all access to state is managed by ConcurrentHashMap, and all the keys and values of the Map are immutable.
+
+Listing 4.7. Delegating Thread Safety to a ConcurrentHashMap.
+
+@ThreadSafe
+public class DelegatingVehicleTracker {
+    private final ConcurrentMap<String, Point> locations;
+    private final Map<String, Point> unmodifiableMap;
+
+    public DelegatingVehicleTracker(Map<String, Point> points) {
+        locations = new ConcurrentHashMap<String, Point>(points);
+        unmodifiableMap = Collections.unmodifiableMap(locations);
+    }
+
+    public Map<String, Point> getLocations() {
+        return unmodifiableMap;
+    }
+
+    public Point getLocation(String id) {
+        return locations.get(id);
+    }
+
+    public void setLocation(String id, int x, int y) {
+        if (locations.replace(id, new Point(x, y)) == null)
+            throw new IllegalArgumentException(
+                "invalid vehicle name: " + id);
+    }
+}
+
+If we had used the original MutablePoint class instead of Point, we would be breaking encapsulation by letting getLocations publish a reference to mutable state that is not thread-safe. Notice that we¡¯ve changed the behavior of the vehicle tracker class slightly; while the monitor version returned a snapshot of the locations, the delegating version returns an unmodifiable but ¡°live¡± view of the vehicle locations. This means that if thread A calls getLocations and thread B later modifies the location of some of the points, those changes are reflected in the Map returned to thread A. As we remarked earlier, this can be a benefit (more up-to-date data) or a liability (potentially inconsistent view of the fleet), depending on your requirements.
+
+If an unchanging view of the fleet is required, getLocations could instead return a shallow copy of the locations map. Since the contents of the Map are immutable, only the structure of the Map, not the contents, must be copied, as shown in Listing 4.8 (which returns a plain HashMap, since getLocations did not promise to return a thread-safe Map).
+
+Listing 4.8. Returning a Static Copy of the Location Set Instead of a ¡°Live¡± One.
+
+public Map<String, Point> getLocations() {
+    return Collections.unmodifiableMap(
+            new HashMap<String, Point>(locations));
+}
+
+4.3.2. Independent State Variables
+
+The delegation examples so far delegate to a single, thread-safe state variable. We can also delegate thread safety to more than one underlying state variable as long as those underlying state variables are independent, meaning that the composite class does not impose any invariants involving the multiple state variables.
+
+VisualComponent in Listing 4.9 is a graphical component that allows clients to register listeners for mouse and keystroke events. It maintains a list of registered listeners of each type, so that when an event occurs the appropriate listeners can be invoked. But there is no relationship between the set of mouse listeners and key listeners; the two are independent, and therefore VisualComponent can delegate its thread safety obligations to two underlying thread-safe lists.
+
+Listing 4.9. Delegating Thread Safety to Multiple Underlying State Variables.
+
+public class VisualComponent {
+    private final List<KeyListener> keyListeners
+        = new CopyOnWriteArrayList<KeyListener>();
+    private final List<MouseListener> mouseListeners
+        = new CopyOnWriteArrayList<MouseListener>();
+
+    public void addKeyListener(KeyListener listener) {
+        keyListeners.add(listener);
+    }
+
+    public void addMouseListener(MouseListener listener) {
+        mouseListeners.add(listener);
+    }
+
+    public void removeKeyListener(KeyListener listener) {
+        keyListeners.remove(listener);
+    }
+
+    public void removeMouseListener(MouseListener listener) {
+        mouseListeners.remove(listener);
+    }
+}
+
+VisualComponent uses a CopyOnWriteArrayList to store each listener list; this is a thread-safe List implementation particularly suited for managing listener lists (see Section 5.2.3). Each List is thread-safe, and because there are no constraints coupling the state of one to the state of the other, VisualComponent can delegate its thread safety responsibilities to the underlying mouseListeners and keyListeners objects.
+
+4.3.3. When Delegation Fails
+
+Most composite classes are not as simple as VisualComponent: they have invariants that relate their component state variables. NumberRange in Listing 4.10 uses two AtomicIntegers to manage its state, but imposes an additional constraint¡ªthat the first number be less than or equal to the second.
+
+Listing 4.10. Number Range Class that does Not Sufficiently Protect Its Invariants. Don¡¯t Do this.
+
+
+Code View: Scroll / Show All
+public class NumberRange {
+    // INVARIANT: lower <= upper
+    private final AtomicInteger lower = new AtomicInteger(0);
+    private final AtomicInteger upper = new AtomicInteger(0);
+
+    public void setLower(int i) {
+        // Warning -- unsafe check-then-act
+        if (i > upper.get())
+            throw new IllegalArgumentException(
+                    "can't set lower to " + i + " > upper");
+        lower.set(i);
+    }
+
+    public void setUpper(int i) {
+        // Warning -- unsafe check-then-act
+        if (i < lower.get())
+            throw new IllegalArgumentException(
+                    "can't set upper to " + i + " < lower");
+        upper.set(i);
+    }
+
+    public boolean isInRange(int i) {
+        return (i >= lower.get() && i <= upper.get());
+    }
+}
+
+
+					  
+
+NumberRange is not thread-safe; it does not preserve the invariant that constrains lower and upper. The setLower and setUpper methods attempt to respect this invariant, but do so poorly. Both setLower and setUpper are check-then-act sequences, but they do not use sufficient locking to make them atomic. If the number range holds (0, 10), and one thread calls setLower(5) while another thread calls setUpper(4), with some unlucky timing both will pass the checks in the setters and both modifications will be applied. The result is that the range now holds (5, 4)¡ªan invalid state. So while the underlying AtomicIntegers are thread-safe, the composite class is not. Because the underlying state variables lower and upper are not independent, NumberRange cannot simply delegate thread safety to its thread-safe state variables.
+
+NumberRange could be made thread-safe by using locking to maintain its invariants, such as guarding lower and upper with a common lock. It must also avoid publishing lower and upper to prevent clients from subverting its invariants.
+
+If a class has compound actions, as NumberRange does, delegation alone is again not a suitable approach for thread safety. In these cases, the class must provide its own locking to ensure that compound actions are atomic, unless the entire compound action can also be delegated to the underlying state variables.
+
+If a class is composed of multiple independent thread-safe state variables and has no operations that have any invalid state transitions, then it can delegate thread safety to the underlying state variables.
+
+
+The problem that prevented NumberRange from being thread-safe even though its state components were thread-safe is very similar to one of the rules about volatile variables described in Section 3.1.4: a variable is suitable for being declared volatile only if it does not participate in invariants involving other state variables.
+
+4.3.4. Publishing Underlying State Variables
+
+When you delegate thread safety to an object¡¯s underlying state variables, under what conditions can you publish those variables so that other classes can modify them as well? Again, the answer depends on what invariants your class imposes on those variables. While the underlying value field in Counter could take on any integer value, Counter constrains it to take on only positive values, and the increment operation constrains the set of valid next states given any current state. If you were to make the value field public, clients could change it to an invalid value, so publishing it would render the class incorrect. On the other hand, if a variable represents the current temperature or the ID of the last user to log on, then having another class modify this value at any time probably would not violate any invariants, so publishing this variable might be acceptable. (It still may not be a good idea, since publishing mutable variables constrains future development and opportunities for subclassing, but it would not necessarily render the class not thread-safe.)
+
+If a state variable is thread-safe, does not participate in any invariants that constrain its value, and has no prohibited state transitions for any of its operations, then it can safely be published.
+
+
+For example, it would be safe to publish mouseListeners or keyListeners in VisualComponent. Because VisualComponent does not impose any constraints on the valid states of its listener lists, these fields could be made public or otherwise published without compromising thread safety.
+
+4.3.5. Example: Vehicle Tracker that Publishes Its State
+
+Let¡¯s construct another version of the vehicle tracker that publishes its underlying mutable state. Again, we need to modify the interface a little bit to accommodate this change, this time using mutable but thread-safe points.
+
+Listing 4.11. Thread-safe Mutable Point Class.
+
+@ThreadSafe
+public class SafePoint {
+    @GuardedBy("this") private int x, y;
+
+    private SafePoint(int[] a) { this(a[0], a[1]); }
+
+    public SafePoint(SafePoint p) { this(p.get()); }
+
+    public SafePoint(int x, int y) {
+        this.x = x;
+        this.y = y;
+    }
+
+    public synchronized int[] get() {
+        return new int[] { x, y };
+    }
+
+    public synchronized void set(int x, int y) {
+        this.x = x;
+        this.y = y;
+    }
+}
+
+SafePoint in Listing 4.11 provides a getter that retrieves both the x and y values at once by returning a two-element array.[6] If we provided separate getters for x and y, then the values could change between the time one coordinate is retrieved and the other, resulting in a caller seeing an inconsistent value: an (x, y) location where the vehicle never was. Using SafePoint, we can construct a vehicle tracker that publishes the underlying mutable state without undermining thread safety, as shown in the PublishingVehicleTracker class in Listing 4.12.
+
+[6] The private constructor exists to avoid the race condition that would occur if the copy constructor were implemented as this(p.x, p.y); this is an example of the private constructor capture idiom (Bloch and Gafter, 2005).
+
+Listing 4.12. Vehicle Tracker that Safely Publishes Underlying State.
+
+Code View: Scroll / Show All
+@ThreadSafe
+public class PublishingVehicleTracker {
+    private final Map<String, SafePoint> locations;
+    private final Map<String, SafePoint> unmodifiableMap;
+
+    public PublishingVehicleTracker(
+                            Map<String, SafePoint> locations) {
+        this.locations
+            = new ConcurrentHashMap<String, SafePoint>(locations);
+        this.unmodifiableMap
+            = Collections.unmodifiableMap(this.locations);
+    }
+
+    public Map<String, SafePoint> getLocations() {
+        return unmodifiableMap;
+    }
+
+    public SafePoint getLocation(String id) {
+        return locations.get(id);
+    }
+
+    public void setLocation(String id, int x, int y) {
+        if (!locations.containsKey(id))
+            throw new IllegalArgumentException(
+                "invalid vehicle name: " + id);
+        locations.get(id).set(x, y);
+      }
+}
+
+
+					  
+
+PublishingVehicleTracker derives its thread safety from delegation to an underlying ConcurrentHashMap, but this time the contents of the Map are thread-safe mutable points rather than immutable ones. The getLocation method returns an unmodifiable copy of the underlying Map. Callers cannot add or remove vehicles, but could change the location of one of the vehicles by mutating the SafePoint values in the returned Map. Again, the ¡°live¡± nature of the Map may be a benefit or a drawback, depending on the requirements. PublishingVehicleTracker is thread-safe, but would not be so if it imposed any additional constraints on the valid values for vehicle locations. If it needed to be able to ¡°veto¡± changes to vehicle locations or to take action when a location changes, the approach taken by PublishingVehicleTracker would not be appropriate.
+

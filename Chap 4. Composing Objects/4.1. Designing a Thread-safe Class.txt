@@ -1,0 +1,73 @@
+Chapter 4. Composing Objects
+So far, we¡¯ve covered the low-level basics of thread safety and synchronization. But we don¡¯t want to have to analyze each memory access to ensure that our program is thread-safe; we want to be able to take thread-safe components and safely compose them into larger components or programs. This chapter covers patterns for structuring classes that can make it easier to make them thread-safe and to maintain them without accidentally undermining their safety guarantees.
+
+4.1. Designing a Thread-safe Class
+
+While it is possible to write a thread-safe program that stores all its state in public static fields, it is a lot harder to verify its thread safety or to modify it so that it remains thread-safe than one that uses encapsulation appropriately. Encapsulation makes it possible to determine that a class is thread-safe without having to examine the entire program.
+
+The design process for a thread-safe class should include these three basic elements:
+
+Identify the variables that form the object¡¯s state;
+
+Identify the invariants that constrain the state variables;
+
+Establish a policy for managing concurrent access to the object¡¯s state.
+
+
+An object¡¯s state starts with its fields. If they are all of primitive type, the fields comprise the entire state. Counter in Listing 4.1 has only one field, so the value field comprises its entire state. The state of an object with n primitive fields is just the n-tuple of its field values; the state of a 2D Point is its (x, y) value. If the object has fields that are references to other objects, its state will encompass fields from the referenced objects as well. For example, the state of a LinkedList includes the state of all the link node objects belonging to the list.
+
+The synchronization policy defines how an object coordinates access to its state without violating its invariants or postconditions. It specifies what combination of immutability, thread confinement, and locking is used to maintain thread safety, and which variables are guarded by which locks. To ensure that the class can be analyzed and maintained, document the synchronization policy.
+
+Listing 4.1. Simple Thread-safe Counter Using the Java Monitor Pattern.
+
+@ThreadSafe
+public final class Counter {
+    @GuardedBy("this")  private long value = 0;
+
+    public synchronized  long getValue() {
+        return value;
+    }
+    public  synchronized  long increment() {
+        if (value == Long.MAX_VALUE)
+            throw new IllegalStateException("counter overflow");
+        return ++value;
+    }
+}
+
+4.1.1. Gathering Synchronization Requirements
+
+Making a class thread-safe means ensuring that its invariants hold under concurrent access; this requires reasoning about its state. Objects and variables have a state space: the range of possible states they can take on. The smaller this state space, the easier it is to reason about. By using final fields wherever practical, you make it simpler to analyze the possible states an object can be in. (In the extreme case, immutable objects can only be in a single state.)
+
+Many classes have invariants that identify certain states as valid or invalid. The value field in Counter is a long. The state space of a long ranges from Long.MIN_VALUE to Long.MAX_VALUE, but Counter places constraints on value; negative values are not allowed.
+
+Similarly, operations may have postconditions that identify certain state transitions as invalid. If the current state of a Counter is 17, the only valid next state is 18. When the next state is derived from the current state, the operation is necessarily a compound action. Not all operations impose state transition constraints; when updating a variable that holds the current temperature, its previous state does not affect the computation.
+
+Constraints placed on states or state transitions by invariants and postconditions create additional synchronization or encapsulation requirements. If certain states are invalid, then the underlying state variables must be encapsulated, otherwise client code could put the object into an invalid state. If an operation has invalid state transitions, it must be made atomic. On the other hand, if the class does not impose any such constraints, we may be able to relax encapsulation or serialization requirements to obtain greater flexibility or better performance.
+
+A class can also have invariants that constrain multiple state variables. A number range class, like NumberRange in Listing 4.10, typically maintains state variables for the lower and upper bounds of the range. These variables must obey the constraint that the lower bound be less than or equal to the upper bound. Multivariable invariants like this one create atomicity requirements: related variables must be fetched or updated in a single atomic operation. You cannot update one, release and reacquire the lock, and then update the others, since this could involve leaving the object in an invalid state when the lock was released. When multiple variables participate in an invariant, the lock that guards them must be held for the duration of any operation that accesses the related variables.
+
+You cannot ensure thread safety without understanding an object¡¯s invariants and postconditions. Constraints on the valid values or state transitions for state variables can create atomicity and encapsulation requirements.
+
+
+4.1.2. State-dependent Operations
+
+Class invariants and method postconditions constrain the valid states and state transitions for an object. Some objects also have methods with state-based preconditions. For example, you cannot remove an item from an empty queue; a queue must be in the ¡°nonempty¡± state before you can remove an element. Operations with state-based preconditions are called state-dependent [CPJ 3].
+
+In a single-threaded program, if a precondition does not hold, the operation has no choice but to fail. But in a concurrent program, the precondition may become true later due to the action of another thread. Concurrent programs add the possibility of waiting until the precondition becomes true, and then proceeding with the operation.
+
+The built-in mechanisms for efficiently waiting for a condition to become true¡ªwait and notify¡ªare tightly bound to intrinsic locking, and can be difficult to use correctly. To create operations that wait for a precondition to become true before proceeding, it is often easier to use existing library classes, such as blocking queues or semaphores, to provide the desired state-dependent behavior. Blocking library classes such as BlockingQueue, Semaphore, and other synchronizers are covered in Chapter 5; creating state-dependent classes using the low-level mechanisms provided by the platform and class library is covered in Chapter 14.
+
+4.1.3. State Ownership
+
+We implied in Section 4.1 that an object¡¯s state could be a subset of the fields in the object graph rooted at that object. Why might it be a subset? Under what conditions are fields reachable from a given object not part of that object¡¯s state?
+
+When defining which variables form an object¡¯s state, we want to consider only the data that object owns. Ownership is not embodied explicitly in the language, but is instead an element of class design. If you allocate and populate a HashMap, you are creating multiple objects: the HashMap object, a number of Map.Entry objects used by the implementation of HashMap, and perhaps other internal objects as well. The logical state of a HashMap includes the state of all its Map.Entry and internal objects, even though they are implemented as separate objects.
+
+For better or worse, garbage collection lets us avoid thinking carefully about ownership. When passing an object to a method in C++, you have to think fairly carefully about whether you are transferring ownership, engaging in a short-term loan, or envisioning long-term joint ownership. In Java, all these same ownership models are possible, but the garbage collector reduces the cost of many of the common errors in reference sharing, enabling less-than-precise thinking about ownership.
+
+In many cases, ownership and encapsulation go together¡ªthe object encapsulates the state it owns and owns the state it encapsulates. It is the owner of a given state variable that gets to decide on the locking protocol used to maintain the integrity of that variable¡¯s state. Ownership implies control, but once you publish a reference to a mutable object, you no longer have exclusive control; at best, you might have ¡°shared ownership¡±. A class usually does not own the objects passed to its methods or constructors, unless the method is designed to explicitly transfer ownership of objects passed in (such as the synchronized collection wrapper factory methods).
+
+Collection classes often exhibit a form of ¡°split ownership¡±, in which the collection owns the state of the collection infrastructure, but client code owns the objects stored in the collection. An example is ServletContext from the servlet framework. ServletContext provides a Map-like object container service to servlets where they can register and retrieve application objects by name with setAttribute and getAttribute. The ServletContext object implemented by the servlet container must be thread-safe, because it will necessarily be accessed by multiple threads. Servlets need not use synchronization when calling set-Attribute and getAttribute, but they may have to use synchronization when using the objects stored in the ServletContext. These objects are owned by the application; they are being stored for safekeeping by the servlet container on the application¡¯s behalf. Like all shared objects, they must be shared safely; in order to prevent interference from multiple threads accessing the same object concurrently, they should either be thread-safe, effectively immutable, or explicitly guarded by a lock.[1]
+
+[1] Interestingly, the HttpSession object, which performs a similar function in the servlet framework, may have stricter requirements. Because the servlet container may access the objects in the HttpSession so they can be serialized for replication or passivation, they must be thread-safe because the container will be accessing them as well as the web application. (We say ¡°may have¡± since replication and passivation is outside of the servlet specification but is a common feature of servlet containers.)
+
