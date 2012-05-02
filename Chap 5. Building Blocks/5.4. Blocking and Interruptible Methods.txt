@@ -1,0 +1,34 @@
+5.4. Blocking and Interruptible Methods
+
+Threads may block, or pause, for several reasons: waiting for I/O completion, waiting to acquire a lock, waiting to wake up from Thread.sleep, or waiting for the result of a computation in another thread. When a thread blocks, it is usually suspended and placed in one of the blocked thread states (BLOCKED, WAITING, or TIMED_WAITING). The distinction between a blocking operation and an ordinary operation that merely takes a long time to finish is that a blocked thread must wait for an event that is beyond its control before it can proceed！the I/O completes, the lock becomes available, or the external computation finishes. When that external event occurs, the thread is placed back in the RUNNABLE state and becomes eligible again for scheduling.
+
+The put and take methods of BlockingQueue throw the checked InterruptedException, as do a number of other library methods such as Thread.sleep. When a method can throw InterruptedException, it is telling you that it is a blocking method, and further that if it is interrupted, it will make an effort to stop blocking early.
+
+Thread provides the interrupt method for interrupting a thread and for querying whether a thread has been interrupted. Each thread has a boolean property that represents its interrupted status; interrupting a thread sets this status.
+
+Interruption is a cooperative mechanism. One thread cannot force another to stop what it is doing and do something else; when thread A interrupts thread B, A is merely requesting that B stop what it is doing when it gets to a convenient stopping point！if it feels like it. While there is nothing in the API or language specification that demands any specific application-level semantics for interruption, the most sensible use for interruption is to cancel an activity. Blocking methods that are responsive to interruption make it easier to cancel long-running activities on a timely basis.
+
+When your code calls a method that throws InterruptedException, then your method is a blocking method too, and must have a plan for responding to interruption. For library code, there are basically two choices:
+
+Propagate the InterruptedException. This is often the most sensible policy if you can get away with it！just propagate the InterruptedException to your caller. This could involve not catching InterruptedException, or catching it and throwing it again after performing some brief activity-specific cleanup.
+
+Restore the interrupt. Sometimes you cannot throw InterruptedException, for instance when your code is part of a Runnable. In these situations, you must catch InterruptedException and restore the interrupted status by calling interrupt on the current thread, so that code higher up the call stack can see that an interrupt was issued, as demonstrated in Listing 5.10.
+
+You can get much more sophisticated with interruption, but these two approaches should work in the vast majority of situations. But there is one thing you should not do with InterruptedException！catch it and do nothing in response. This deprives code higher up on the call stack of the opportunity to act on the interruption, because the evidence that the thread was interrupted is lost. The only situation in which it is acceptable to swallow an interrupt is when you are extending Thread and therefore control all the code higher up on the call stack. Cancellation and interruption are covered in greater detail in Chapter 7.
+
+Listing 5.10. Restoring the Interrupted Status so as Not to Swallow the Interrupt.
+
+public class TaskRunnable implements Runnable {
+    BlockingQueue<Task> queue;
+    ...
+    public void run() {
+        try {
+            processTask(queue.take());
+        } catch (InterruptedException e) {
+             // restore interrupted status
+             Thread.currentThread().interrupt();
+        }
+    }
+}
+
+

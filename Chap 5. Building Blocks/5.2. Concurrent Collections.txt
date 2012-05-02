@@ -1,0 +1,59 @@
+5.2. Concurrent Collections
+
+Java 5.0 improves on the synchronized collections by providing several concurrent collection classes. Synchronized collections achieve their thread safety by serializing all access to the collection¡¯s state. The cost of this approach is poor concurrency; when multiple threads contend for the collection-wide lock, throughput suffers.
+
+The concurrent collections, on the other hand, are designed for concurrent access from multiple threads. Java 5.0 adds ConcurrentHashMap, a replacement for synchronized hash-based Map implementations, and CopyOnWriteArrayList, a replacement for synchronized List implementations for cases where traversal is the dominant operation. The new ConcurrentMap interface adds support for common compound actions such as put-if-absent, replace, and conditional remove.
+
+Replacing synchronized collections with concurrent collections can offer dramatic scalability improvements with little risk.
+
+
+Java 5.0 also adds two new collection types, Queue and BlockingQueue. A Queue is intended to hold a set of elements temporarily while they await processing. Several implementations are provided, including ConcurrentLinkedQueue, a traditional FIFO queue, and PriorityQueue, a (non concurrent) priority ordered queue. Queue operations do not block; if the queue is empty, the retrieval operation returns null. While you can simulate the behavior of a Queue with a List¡ªin fact, LinkedList also implements Queue¡ªthe Queue classes were added because eliminating the random-access requirements of List admits more efficient concurrent implementations.
+
+BlockingQueue extends Queue to add blocking insertion and retrieval operations. If the queue is empty, a retrieval blocks until an element is available, and if the queue is full (for bounded queues) an insertion blocks until there is space available. Blocking queues are extremely useful in producer-consumer designs, and are covered in greater detail in Section 5.3.
+
+Just as ConcurrentHashMap is a concurrent replacement for a synchronized hash-based Map, Java 6 adds ConcurrentSkipListMap and ConcurrentSkipListSet, which are concurrent replacements for a synchronized SortedMap or SortedSet (such as TreeMap or TreeSet wrapped with synchronizedMap).
+
+5.2.1. ConcurrentHashMap
+
+The synchronized collections classes hold a lock for the duration of each operation. Some operations, such as HashMap.get or List.contains, may involve more work than is initially obvious: traversing a hash bucket or list to find a specific object entails calling equals (which itself may involve a fair amount of computation) on a number of candidate objects. In a hash-based collection, if hashCode does not spread out hash values well, elements may be unevenly distributed among buckets; in the degenerate case, a poor hash function will turn a hash table into a linked list. Traversing a long list and calling equals on some or all of the elements can take a long time, and during that time no other thread can access the collection.
+
+ConcurrentHashMap is a hash-based Map like HashMap, but it uses an entirely different locking strategy that offers better concurrency and scalability. Instead of synchronizing every method on a common lock, restricting access to a single thread at a time, it uses a finer-grained locking mechanism called lock striping (see Section 11.4.3) to allow a greater degree of shared access. Arbitrarily many reading threads can access the map concurrently, readers can access the map concurrently with writers, and a limited number of writers can modify the map concurrently. The result is far higher throughput under concurrent access, with little performance penalty for single-threaded access.
+
+ConcurrentHashMap, along with the other concurrent collections, further improve on the synchronized collection classes by providing iterators that do not throw ConcurrentModificationException, thus eliminating the need to lock the collection during iteration. The iterators returned by ConcurrentHashMap are weakly consistent instead of fail-fast. A weakly consistent iterator can tolerate concurrent modification, traverses elements as they existed when the iterator was constructed, and may (but is not guaranteed to) reflect modifications to the collection after the construction of the iterator.
+
+As with all improvements, there are still a few tradeoffs. The semantics of methods that operate on the entire Map, such as size and isEmpty, have been slightly weakened to reflect the concurrent nature of the collection. Since the result of size could be out of date by the time it is computed, it is really only an estimate, so size is allowed to return an approximation instead of an exact count. While at first this may seem disturbing, in reality methods like size and isEmpty are far less useful in concurrent environments because these quantities are moving targets. So the requirements for these operations were weakened to enable performance optimizations for the most important operations, primarily get, put, containsKey, and remove.
+
+The one feature offered by the synchronized Map implementations but not by ConcurrentHashMap is the ability to lock the map for exclusive access. With Hashtable and synchronizedMap, acquiring the Map lock prevents any other thread from accessing it. This might be necessary in unusual cases such as adding several mappings atomically, or iterating the Map several times and needing to see the same elements in the same order. On the whole, though, this is a reasonable tradeoff: concurrent collections should be expected to change their contents continuously.
+
+Because it has so many advantages and so few disadvantages compared to Hashtable or synchronizedMap, replacing synchronized Map implementations with ConcurrentHashMap in most cases results only in better scalability. Only if your application needs to lock the map for exclusive access [3] is ConcurrentHashMap not an appropriate drop-in replacement.
+
+[3] Or if you are relying on the synchronization side effects of the synchronized Map implementations.
+
+5.2.2. Additional Atomic Map Operations
+
+Since a ConcurrentHashMap cannot be locked for exclusive access, we cannot use client-side locking to create new atomic operations such as put-if-absent, as we did for Vector in Section 4.4.1. Instead, a number of common compound operations such as put-if-absent, remove-if-equal, and replace-if-equal are implemented as atomic operations and specified by the ConcurrentMap interface, shown in Listing 5.7. If you find yourself adding such functionality to an existing synchronized Map implementation, it is probably a sign that you should consider using a ConcurrentMap instead.
+
+5.2.3. CopyOnWriteArrayList
+
+CopyOnWriteArrayList is a concurrent replacement for a synchronized List that offers better concurrency in some common situations and eliminates the need to lock or copy the collection during iteration. (Similarly, CopyOnWriteArraySet is a concurrent replacement for a synchronized Set.)
+
+The copy-on-write collections derive their thread safety from the fact that as long as an effectively immutable object is properly published, no further synchronization is required when accessing it. They implement mutability by creating and republishing a new copy of the collection every time it is modified. Iterators for the copy-on-write collections retain a reference to the backing array that was current at the start of iteration, and since this will never change, they need to synchronize only briefly to ensure visibility of the array contents. As a result, multiple threads can iterate the collection without interference from one another or from threads wanting to modify the collection. The iterators returned by the copy-on-write collections do not throw ConcurrentModificationException and return the elements exactly as they were at the time the iterator was created, regardless of subsequent modifications.
+
+Listing 5.7. ConcurrentMap Interface.
+
+public interface ConcurrentMap<K,V> extends Map<K,V> {
+    // Insert into map only if no value is mapped from K
+    V putIfAbsent(K key, V value);
+
+    // Remove only if K is mapped to V
+    boolean remove(K key, V value);
+
+    // Replace value only if K is mapped to oldValue
+    boolean replace(K key, V oldValue, V newValue);
+
+    // Replace value only if K is mapped to some value
+    V replace(K key, V newValue);
+}
+
+Obviously, there is some cost to copying the backing array every time the collection is modified, especially if the collection is large; the copy-on-write collections are reasonable to use only when iteration is far more common than modification. This criterion exactly describes many event-notification systems: delivering a notification requires iterating the list of registered listeners and calling each one of them, and in most cases registering or unregistering an event listener is far less common than receiving an event notification. (See [CPJ 2.4.4] for more information on copy-on-write.)
+

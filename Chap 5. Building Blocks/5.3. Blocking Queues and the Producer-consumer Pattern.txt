@@ -1,0 +1,118 @@
+5.3. Blocking Queues and the Producer-consumer Pattern
+
+Blocking queues provide blocking put and take methods as well as the timed equivalents offer and poll. If the queue is full, put blocks until space becomes available; if the queue is empty, take blocks until an element is available. Queues can be bounded or unbounded; unbounded queues are never full, so a put on an unbounded queue never blocks.
+
+Blocking queues support the producer-consumer design pattern. A producerconsumer design separates the identification of work to be done from the execution of that work by placing work items on a ¡°to do¡± list for later processing, rather than processing them immediately as they are identified. The producerconsumer pattern simplifies development because it removes code dependencies between producer and consumer classes, and simplifies workload management by decoupling activities that may produce or consume data at different or variable rates.
+
+In a producer-consumer design built around a blocking queue, producers place data onto the queue as it becomes available, and consumers retrieve data from the queue when they are ready to take the appropriate action. Producers don¡¯t need to know anything about the identity or number of consumers, or even whether they are the only producer¡ªall they have to do is place data items on the queue. Similarly, consumers need not know who the producers are or where the work came from. BlockingQueue simplifies the implementation of producerconsumer designs with any number of producers and consumers. One of the most common producer-consumer designs is a thread pool coupled with a work queue; this pattern is embodied in the Executor task execution framework that is the subject of Chapters 6 and 8.
+
+The familiar division of labor for two people washing the dishes is an example of a producer-consumer design: one person washes the dishes and places them in the dish rack, and the other person retrieves the dishes from the rack and dries them. In this scenario, the dish rack acts as a blocking queue; if there are no dishes in the rack, the consumer waits until there are dishes to dry, and if the rack fills up, the producer has to stop washing until there is more space. This analogy extends to multiple producers (though there may be contention for the sink) and multiple consumers; each worker interacts only with the dish rack. No one needs to know how many producers or consumers there are, or who produced a given item of work.
+
+The labels ¡°producer¡± and ¡°consumer¡± are relative; an activity that acts as a consumer in one context may act as a producer in another. Drying the dishes ¡°consumes¡± clean wet dishes and ¡°produces¡± clean dry dishes. A third person wanting to help might put away the dry dishes, in which case the drier is both a consumer and a producer, and there are now two shared work queues (each of which may block the drier from proceeding.)
+
+Blocking queues simplify the coding of consumers, since take blocks until data is available. If the producers don¡¯t generate work fast enough to keep the consumers busy, the consumers just wait until more work is available. Sometimes this is perfectly acceptable (as in a server application when no client is requesting service), and sometimes it indicates that the ratio of producer threads to consumer threads should be adjusted to achieve better utilization (as in a web crawler or other application in which there is effectively infinite work to do).
+
+If the producers consistently generate work faster than the consumers can process it, eventually the application will run out of memory because work items will queue up without bound. Again, the blocking nature of put greatly simplifies coding of producers; if we use a bounded queue, then when the queue fills up the producers block, giving the consumers time to catch up because a blocked producer cannot generate more work.
+
+Blocking queues also provide an offer method, which returns a failure status if the item cannot be enqueued. This enables you to create more flexible policies for dealing with overload, such as shedding load, serializing excess work items and writing them to disk, reducing the number of producer threads, or throttling producers in some other manner.
+
+Bounded queues are a powerful resource management tool for building reliable applications: they make your program more robust to overload by throttling activities that threaten to produce more work than can be handled.
+
+
+While the producer-consumer pattern enables producer and consumer code to be decoupled from each other, their behavior is still coupled indirectly through the shared work queue. It is tempting to assume that the consumers will always keep up, so that you need not place any bounds on the size of work queues, but this is a prescription for rearchitecting your system later. Build resource management into your design early using blocking queues¡ªit is a lot easier to do this up front than to retrofit it later. Blocking queues make this easy for a number of situations, but if blocking queues don¡¯t fit easily into your design, you can create other blocking data structures using Semaphore (see Section 5.5.3).
+
+The class library contains several implementations of BlockingQueue. LinkedBlockingQueue and ArrayBlockingQueue are FIFO queues, analogous to LinkedList and ArrayList but with better concurrent performance than a synchronized List. PriorityBlockingQueue is a priority-ordered queue, which is useful when you want to process elements in an order other than FIFO. Just like other sorted collections, PriorityBlockingQueue can compare elements according to their natural order (if they implement Comparable) or using a Comparator.
+
+The last BlockingQueue implementation, SynchronousQueue, is not really a queue at all, in that it maintains no storage space for queued elements. Instead, it maintains a list of queued threads waiting to enqueue or dequeue an element. In the dish-washing analogy, this would be like having no dish rack, but instead handing the washed dishes directly to the next available dryer. While this may seem a strange way to implement a queue, it reduces the latency associated with moving data from producer to consumer because the work can be handed off directly. (In a traditional queue, the enqueue and dequeue operations must complete sequentially before a unit of work can be handed off.) The direct handoff also feeds back more information about the state of the task to the producer; when the handoff is accepted, it knows a consumer has taken responsibility for it, rather than simply letting it sit on a queue somewhere¡ªmuch like the difference between handing a document to a colleague and merely putting it in her mailbox and hoping she gets it soon. Since a SynchronousQueue has no storage capacity, put and take will block unless another thread is already waiting to participate in the handoff. Synchronous queues are generally suitable only when there are enough consumers that there nearly always will be one ready to take the handoff.
+
+5.3.1. Example: Desktop Search
+
+One type of program that is amenable to decomposition into producers and consumers is an agent that scans local drives for documents and indexes them for later searching, similar to Google Desktop or the Windows Indexing service. DiskCrawler in Listing 5.8 shows a producer task that searches a file hierarchy for files meeting an indexing criterion and puts their names on the work queue; Indexer in Listing 5.8 shows the consumer task that takes file names from the queue and indexes them.
+
+The producer-consumer pattern offers a thread-friendly means of decomposing the desktop search problem into simpler components. Factoring file-crawling and indexing into separate activities results in code that is more readable and reusable than with a monolithic activity that does both; each of the activities has only a single task to do, and the blocking queue handles all the flow control, so the code for each is simpler and clearer.
+
+The producer-consumer pattern also enables several performance benefits. Producers and consumers can execute concurrently; if one is I/O-bound and the other is CPU-bound, executing them concurrently yields better overall throughput than executing them sequentially. If the producer and consumer activities are parallelizable to different degrees, tightly coupling them reduces parallelizability to that of the less parallelizable activity.
+
+Listing 5.9 starts several crawlers and indexers, each in their own thread. As written, the consumer threads never exit, which prevents the program from terminating; we examine several techniques for addressing this problem in Chapter 7. While this example uses explicitly managed threads, many producer-consumer designs can be expressed using the Executor task execution framework, which itself uses the producer-consumer pattern.
+
+5.3.2. Serial Thread Confinement
+
+The blocking queue implementations in java.util.concurrent all contain sufficient internal synchronization to safely publish objects from a producer thread to the consumer thread.
+
+For mutable objects, producer-consumer designs and blocking queues facilitate serial thread confinement for handing off ownership of objects from producers to consumers. A thread-confined object is owned exclusively by a single thread, but that ownership can be ¡°transferred¡± by publishing it safely where only one other thread will gain access to it and ensuring that the publishing thread does not access it after the handoff. The safe publication ensures that the object¡¯s state is visible to the new owner, and since the original owner will not touch it again, it is now confined to the new thread. The new owner may modify it freely since it has exclusive access.
+
+Object pools exploit serial thread confinement, ¡°lending¡± an object to a requesting thread. As long as the pool contains sufficient internal synchronization to publish the pooled object safely, and as long as the clients do not themselves publish the pooled object or use it after returning it to the pool, ownership can be transferred safely from thread to thread.
+
+One could also use other publication mechanisms for transferring ownership of a mutable object, but it is necessary to ensure that only one thread receives the object being handed off. Blocking queues make this easy; with a little more work, it could also done with the atomic remove method of ConcurrentMap or the compareAndSet method of AtomicReference.
+
+Listing 5.8. Producer and Consumer Tasks in a Desktop Search Application.
+
+Code View: Scroll / Show All
+public class FileCrawler implements Runnable {
+    private final BlockingQueue<File> fileQueue;
+    private final FileFilter fileFilter;
+    private final File root;
+    ...
+    public void run() {
+        try {
+            crawl(root);
+        } catch (InterruptedException e) {
+            Thread.currentThread().interrupt();
+        }
+    }
+
+    private void crawl(File root) throws InterruptedException {
+        File[] entries = root.listFiles(fileFilter);
+        if (entries != null) {
+            for (File entry : entries)
+                if (entry.isDirectory())
+                    crawl(entry);
+                else if (!alreadyIndexed(entry))
+                    fileQueue.put(entry);
+        }
+    }
+}
+
+public class Indexer implements Runnable {
+    private final BlockingQueue<File> queue;
+
+    public Indexer(BlockingQueue<File> queue) {
+        this.queue = queue;
+    }
+
+    public void run() {
+        try {
+            while (true)
+                indexFile(queue.take());
+        } catch (InterruptedException e) {
+            Thread.currentThread().interrupt();
+        }
+    }
+}
+
+
+					  
+
+Listing 5.9. Starting the Desktop Search.
+
+public static void startIndexing(File[] roots) {
+    BlockingQueue<File> queue = new LinkedBlockingQueue<File>(BOUND);
+    FileFilter filter = new FileFilter() {
+        public boolean accept(File file) { return true; }
+    };
+
+    for (File root : roots)
+        new Thread(new FileCrawler(queue, filter, root)).start();
+
+    for (int i = 0; i < N_CONSUMERS; i++)
+        new Thread(new Indexer(queue)).start();
+}
+
+5.3.3. Deques and Work Stealing
+
+Java 6 also adds another two collection types, Deque (pronounced ¡°deck¡±) and BlockingDeque, that extend Queue and BlockingQueue. A Deque is a doubleended queue that allows efficient insertion and removal from both the head and the tail. Implementations include ArrayDeque and LinkedBlockingDeque.
+
+Just as blocking queues lend themselves to the producer-consumer pattern, deques lend themselves to a related pattern called work stealing. A producerconsumer design has one shared work queue for all consumers; in a work stealing design, every consumer has its own deque. If a consumer exhausts the work in its own deque, it can steal work from the tail of someone else¡¯s deque. Work stealing can be more scalable than a traditional producer-consumer design because workers don¡¯t contend for a shared work queue; most of the time they access only their own deque, reducing contention. When a worker has to access another¡¯s queue, it does so from the tail rather than the head, further reducing contention.
+
+Work stealing is well suited to problems in which consumers are also producers¡ªwhen performing a unit of work is likely to result in the identification of more work. For example, processing a page in a web crawler usually results in the identification of new pages to be crawled. Similarly, many graph-exploring algorithms, such as marking the heap during garbage collection, can be efficiently parallelized using work stealing. When a worker identifies a new unit of work, it places it at the end of its own deque (or alternatively, in a work sharing design, on that of another worker); when its deque is empty, it looks for work at the end of someone else¡¯s deque, ensuring that each worker stays busy.
+

@@ -1,0 +1,94 @@
+Part II: Structuring Concurrent Applications
+
+Task Execution
+
+Cancellation and Shutdown
+
+Applying Thread Pools
+
+GUI Applications
+
+Chapter 6. Task Execution
+Most concurrent applications are organized around the execution of tasks: abstract, discrete units of work. Dividing the work of an application into tasks simplifies program organization, facilitates error recovery by providing natural transaction boundaries, and promotes concurrency by providing a natural structure for parallelizing work.
+
+6.1. Executing Tasks in Threads
+
+The first step in organizing a program around task execution is identifying sensible task boundaries. Ideally, tasks are independent activities: work that doesn¡¯t depend on the state, result, or side effects of other tasks. Independence facilitates concurrency, as independent tasks can be executed in parallel if there are adequate processing resources. For greater flexibility in scheduling and load balancing tasks, each task should also represent a small fraction of your application¡¯s processing capacity.
+
+Server applications should exhibit both good throughput and good responsiveness under normal load. Application providers want applications to support as many users as possible, so as to reduce provisioning costs per user; users want to get their response quickly. Further, applications should exhibit graceful degradation as they become overloaded, rather than simply falling over under heavy load. Choosing good task boundaries, coupled with a sensible task execution policy (see Section 6.2.2), can help achieve these goals.
+
+Most server applications offer a natural choice of task boundary: individual client requests. Web servers, mail servers, file servers, EJB containers, and database servers all accept requests via network connections from remote clients. Using individual requests as task boundaries usually offers both independence and appropriate task sizing. For example, the result of submitting a message to a mail server is not affected by the other messages being processed at the same time, and handling a single message usually requires a very small percentage of the server¡¯s total capacity.
+
+6.1.1. Executing Tasks Sequentially
+
+There are a number of possible policies for scheduling tasks within an application, some of which exploit the potential for concurrency better than others. The simplest is to execute tasks sequentially in a single thread. SingleThreadWeb-Server in Listing 6.1 processes its tasks¡ªHTTP requests arriving on port 80¡ªsequentially. The details of the request processing aren¡¯t important; we¡¯re interested in characterizing the concurrency of various scheduling policies.
+
+Listing 6.1. Sequential Web Server.
+
+
+class SingleThreadWebServer {
+    public static void main(String[] args) throws IOException {
+        ServerSocket socket = new ServerSocket(80);
+        while (true) {
+            Socket connection = socket.accept();
+            handleRequest(connection);
+        }
+    }
+}
+
+SingleThreadedWebServer is simple and theoretically correct, but would perform poorly in production because it can handle only one request at a time. The main thread alternates between accepting connections and processing the associated request. While the server is handling a request, new connections must wait until it finishes the current request and calls accept again. This might work if request processing were so fast that handleRequest effectively returned immediately, but this doesn¡¯t describe any web server in the real world.
+
+Processing a web request involves a mix of computation and I/O. The server must perform socket I/O to read the request and write the response, which can block due to network congestion or connectivity problems. It may also perform file I/O or make database requests, which can also block. In a single-threaded server, blocking not only delays completing the current request, but prevents pending requests from being processed at all. If one request blocks for an unusually long time, users might think the server is unavailable because it appears unresponsive. At the same time, resource utilization is poor, since the CPU sits idle while the single thread waits for its I/O to complete.
+
+In server applications, sequential processing rarely provides either good throughput or good responsiveness. There are exceptions¡ªsuch as when tasks are few and long-lived, or when the server serves a single client that makes only a single request at a time¡ªbut most server applications do not work this way.[1]
+
+[1] In some situations, sequential processing may offer a simplicity or safety advantage; most GUI frameworks process tasks sequentially using a single thread. We return to the sequential model in Chapter 9.
+
+6.1.2. Explicitly Creating Threads for Tasks
+
+A more responsive approach is to create a new thread for servicing each request, as shown in ThreadPerTaskWebServer in Listing 6.2.
+
+Listing 6.2. Web Server that Starts a New Thread for Each Request.
+
+
+class ThreadPerTaskWebServer {
+    public static void main(String[] args) throws IOException {
+        ServerSocket socket = new ServerSocket(80);
+        while (true) {
+            final  Socket connection = socket.accept();
+            Runnable task = new Runnable() {
+                    public void run() {
+                        handleRequest(connection);
+                    }
+                };
+            new Thread(task).start();
+        }
+    }
+}
+
+ThreadPerTaskWebServer is similar in structure to the single-threaded version¡ªthe main thread still alternates between accepting an incoming connection and dispatching the request. The difference is that for each connection, the main loop creates a new thread to process the request instead of processing it within the main thread. This has three main consequences:
+
+Task processing is offloaded from the main thread, enabling the main loop to resume waiting for the next incoming connection more quickly. This enables new connections to be accepted before previous requests complete, improving responsiveness.
+
+Tasks can be processed in parallel, enabling multiple requests to be serviced simultaneously. This may improve throughput if there are multiple processors, or if tasks need to block for any reason such as I/O completion, lock acquisition, or resource availability.
+
+Task-handling code must be thread-safe, because it may be invoked concurrently for multiple tasks.
+
+Under light to moderate load, the thread-per-task approach is an improvement over sequential execution. As long as the request arrival rate does not exceed the server¡¯s capacity to handle requests, this approach offers better responsiveness and throughput.
+
+6.1.3. Disadvantages of Unbounded Thread Creation
+
+For production use, however, the thread-per-task approach has some practical drawbacks, especially when a large number of threads may be created:
+
+Thread lifecycle overhead. Thread creation and teardown are not free. The actual overhead varies across platforms, but thread creation takes time, introducing latency into request processing, and requires some processing activity by the JVM and OS. If requests are frequent and lightweight, as in most server applications, creating a new thread for each request can consume significant computing resources.
+
+Resource consumption. Active threads consume system resources, especially memory. When there are more runnable threads than available processors, threads sit idle. Having many idle threads can tie up a lot of memory, putting pressure on the garbage collector, and having many threads competing for the CPUs can impose other performance costs as well. If you have enough threads to keep all the CPUs busy, creating more threads won¡¯t help and may even hurt.
+
+Stability. There is a limit on how many threads can be created. The limit varies by platform and is affected by factors including JVM invocation parameters, the requested stack size in the Thread constructor, and limits on threads placed by the underlying operating system.[2] When you hit this limit, the most likely result is an OutOfMemoryError. Trying to recover from such an error is very risky; it is far easier to structure your program to avoid hitting this limit.
+
+[2] On 32-bit machines, a major limiting factor is address space for thread stacks. Each thread maintains two execution stacks, one for Java code and one for native code. Typical JVM defaults yield a combined stack size of around half a megabyte. (You can change this with the -Xss JVM flag or through the Thread constructor.) If you divide the per-thread stack size into 232, you get a limit of a few thousands or tens of thousands of threads. Other factors, such as OS limitations, may impose stricter limits.
+
+Up to a certain point, more threads can improve throughput, but beyond that point creating more threads just slows down your application, and creating one thread too many can cause your entire application to crash horribly. The way to stay out of danger is to place some bound on how many threads your application creates, and to test your application thoroughly to ensure that, even when this bound is reached, it does not run out of resources.
+
+The problem with the thread-per-task approach is that nothing places any limit on the number of threads created except the rate at which remote users can throw HTTP requests at it. Like other concurrency hazards, unbounded thread creation may appear to work just fine during prototyping and development, with problems surfacing only when the application is deployed and under heavy load. So a malicious user, or enough ordinary users, can make your web server crash if the traffic load ever reaches a certain threshold. For a server application that is supposed to provide high availability and graceful degradation under load, this is a serious failing.
+
