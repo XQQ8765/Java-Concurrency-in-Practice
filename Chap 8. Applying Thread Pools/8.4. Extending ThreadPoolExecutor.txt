@@ -1,0 +1,55 @@
+8.4. Extending ThreadPoolExecutor
+
+ThreadPoolExecutor was designed for extension, providing several ¡°hooks¡± for subclasses to override¡ªbeforeExecute, afterExecute, and terminated¡ªthat can be used to extend the behavior of ThreadPoolExecutor.
+
+The beforeExecute and afterExecute hooks are called in the thread that executes the task, and can be used for adding logging, timing, monitoring, or statistics gathering. The afterExecute hook is called whether the task completes by returning normally from run or by throwing an Exception. (If the task completes with an Error, afterExecute is not called.) If beforeExecute throws a RuntimeException, the task is not executed and afterExecute is not called.
+
+The terminated hook is called when the thread pool completes the shutdown process, after all tasks have finished and all worker threads have shut down. It can be used to release resources allocated by the Executor during its lifecycle, perform notification or logging, or finalize statistics gathering.
+
+8.4.1. Example: Adding Statistics to a Thread Pool
+
+TimingThreadPool in Listing 8.9 shows a custom thread pool that uses before-Execute, afterExecute, and terminated to add logging and statistics gathering. To measure a task¡¯s runtime, beforeExecute must record the start time and store it somewhere afterExecute can find it. Because execution hooks are called in the thread that executes the task, a value placed in a ThreadLocal by beforeExecute can be retrieved by afterExecute. TimingThreadPool uses a pair of AtomicLongs to keep track of the total number of tasks processed and the total processing time, and uses the terminated hook to print a log message showing the average task time.
+
+Listing 8.9. Thread Pool Extended with Logging and Timing.
+
+Code View: Scroll / Show All
+public class TimingThreadPool extends ThreadPoolExecutor {
+    private final ThreadLocal<Long> startTime
+            = new ThreadLocal<Long>();
+    private final Logger log = Logger.getLogger("TimingThreadPool");
+    private final AtomicLong numTasks = new AtomicLong();
+    private final AtomicLong totalTime = new AtomicLong();
+
+    protected void beforeExecute(Thread t, Runnable r) {
+        super.beforeExecute(t, r);
+        log.fine(String.format("Thread %s: start %s", t, r));
+        startTime.set(System.nanoTime());
+    }
+
+    protected void afterExecute(Runnable r, Throwable t) {
+        try {
+            long endTime = System.nanoTime();
+            long taskTime = endTime - startTime.get();
+            numTasks.incrementAndGet();
+            totalTime.addAndGet(taskTime);
+            log.fine(String.format("Thread %s: end %s, time=%dns",
+                    t, r, taskTime));
+        } finally {
+            super.afterExecute(r, t);
+        }
+    }
+
+    protected void terminated() {
+        try {
+            log.info(String.format("Terminated: avg time=%dns",
+                    totalTime.get() / numTasks.get()));
+        } finally {
+            super.terminated();
+        }
+    }
+}
+
+
+					  
+
+
