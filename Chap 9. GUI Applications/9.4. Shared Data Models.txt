@@ -1,0 +1,111 @@
+9.4. Shared Data Models
+
+Swing presentation objects, including data model objects such as TableModel or TreeModel, are confined to the event thread. In simple GUI programs, all the mutable state is held in the presentation objects and the only thread besides the event thread is the main thread. In these programs enforcing the single-thread rule is easy: don¡¯t access the data model or presentation components from the main thread. More complicated programs may use other threads to move data to or from a persistent store, such as a file system or database, so as not to compromise responsiveness.
+
+In the simplest case, the data in the data model is entered by the user or loaded statically from a file or other data source at application startup, in which case the data is never touched by any thread other than the event thread. But sometimes the presentation model object is only a view onto another data source, such as a database, file system, or remote service. In this case, more than one thread is likely to touch the data as it goes into or out of the application.
+
+Listing 9.7. Background Task Class Supporting Cancellation, Completion Notification, and Progress Notification.
+
+Code View: Scroll / Show All
+abstract class BackgroundTask<V> implements Runnable, Future<V> {
+    private final FutureTask<V> computation = new Computation();
+
+    private class Computation extends FutureTask<V> {
+        public Computation() {
+            super(new Callable<V>() {
+                public V call() throws Exception {
+                    return BackgroundTask.this.compute() ;
+                }
+            });
+        }
+        protected final void done() {
+            GuiExecutor.instance().execute(new Runnable() {
+                public void run() {
+                    V value = null;
+                    Throwable thrown = null;
+                    boolean cancelled = false;
+                    try {
+                        value = get();
+                    } catch (ExecutionException e) {
+                        thrown = e.getCause();
+                    } catch (CancellationException e) {
+                        cancelled = true;
+                    } catch (InterruptedException consumed) {
+                    } finally {
+                        onCompletion(value, thrown, cancelled);
+                    }
+                };
+            });
+        }
+    }
+    protected void setProgress(final int current, final int max) {
+        GuiExecutor.instance().execute(new Runnable() {
+            public void run() { onProgress(current, max); }
+        });
+    }
+    // Called in the background thread
+    protected abstract V compute()  throws Exception;
+    // Called in the event thread
+    protected void onCompletion(V result, Throwable exception,
+                                     boolean cancelled)  { }
+    protected void  onProgress(int current, int max)  { }
+    // Other Future methods forwarded to computation
+}
+
+
+					  
+
+Listing 9.8. Initiating a Long-running, Cancellable Task with BackgroundTask.
+
+Code View: Scroll / Show All
+startButton.addActionListener(new ActionListener() {
+  public void runInBackground(final Runnable task) {
+      startButton.addActionListener(new ActionListener() {
+          public void actionPerformed(ActionEvent e) {
+              class CancelListener implements ActionListener {
+                  BackgroundTask<?> task;
+                  public void actionPerformed(ActionEvent event) {
+                      if (task != null)
+                          task.cancel(true);
+                  }
+              }
+              final CancelListener listener = new CancelListener();
+              listener.task = new BackgroundTask<Void>() {
+                  public Void compute() {
+                     while (moreWork() && !isCancelled())
+                         doSomeWork();
+                     return null;
+                  }
+                  public void onCompletion(boolean cancelled, String s,
+                                         Throwable exception) {
+                     cancelButton.removeActionListener(listener);
+                     label.setText("done");
+                  }
+              };
+              cancelButton.addActionListener(listener);
+              backgroundExec.execute(listener.task);
+          }
+      });
+
+
+					  
+
+For example, you might display the contents of a remote file system using a tree control. You wouldn¡¯t want to enumerate the entire file system before you can display the tree control¡ªthat would take too much time and memory. Instead, the tree can be lazily populated as nodes are expanded. Enumerating even a single directory on a remote volume can take a long time, so you may want to do the enumeration in a background task. When the background task completes, you have to get the data into the tree model somehow. This could be done by using a thread-safe tree model, by ¡°pushing¡± the data from the background task to the event thread by posting a task with invokeLater, or by having the event thread poll to see if the data is available.
+
+9.4.1. Thread-safe Data Models
+
+As long as responsiveness is not unduly affected by blocking, the problem of multiple threads operating on the data can be addressed with a thread-safe data model. If the data model supports fine-grained concurrency, the event thread and background threads should be able to share it without responsiveness problems. For example, DelegatingVehicleTracker on page 65 uses an underlying ConcurrentHashMap whose retrieval operations offer a high degree of concurrency. The downside is that it does not offer a consistent snapshot of the data, which may or may not be a requirement. Thread-safe data models must also generate events when the model has been updated, so that views can be updated when the data changes.
+
+It may sometimes be possible to get thread safety, consistency and good responsiveness with a versioned data model such as CopyOnWriteArrayList [CPJ 2.2.3.3]. When you acquire an iterator for a copy-on-write collection, that iterator traverses the collection as it existed when the iterator was created. However, copy-on-write collections offer good performance only when traversals greatly outnumber modifications, which would probably not be the case in, say, a vehicle tracking application. More specialized versioned data structures may avoid this restriction, but building versioned data structures that provide both efficient concurrent access and do not retain old versions of data longer than needed is not easy, and thus should be considered only when other approaches are not practical.
+
+9.4.2. Split Data Models
+
+From the perspective of the GUI, the Swing table model classes like TableModel and TreeModel are the official repository for data to be displayed. However, these model objects are often themselves ¡°views¡± of other objects managed by the application. A program that has both a presentation-domain and an applicationdomain data model is said to have a split-model design (Fowler, 2005).
+
+In a split-model design, the presentation model is confined to the event thread and the other model, the shared model, is thread-safe and may be accessed by both the event thread and application threads. The presentation model registers listeners with the shared model so it can be notified of updates. The presentation model can then be updated from the shared model by embedding a snapshot of the relevant state in the update message or by having the presentation model retrieve the data directly from the shared model when it receives an update event.
+
+The snapshot approach is simple, but has limitations. It works well when the data model is small, updates are not too frequent, and the structure of the two models is similar. If the data model is large or updates are very frequent, or if one or both sides of the split contain information that is not visible to the other side, it can be more efficient to send incremental updates instead of entire snapshots. This approach has the effect of serializing updates on the shared model and recreating them in the event thread against the presentation model. Another advantage of incremental updates is that finer-grained information about what changed can improve the perceived quality of the display¡ªif only one vehicle moves, we don¡¯t have to repaint the entire display, just the affected regions.
+
+Consider a split-model design when a data model must be shared by more than one thread and implementing a thread-safe data model would be inadvisable because of blocking, consistency, or complexity reasons.
+
+

@@ -1,0 +1,88 @@
+9.2. Short-running GUI Tasks
+
+In a GUI application, events originate in the event thread and bubble up to application-provided listeners, which will probably perform some computation that affects the presentation objects. For simple, short-running tasks, the entire action can stay in the event thread; for longer-running tasks, some of the processing should be offloaded to another thread.
+
+In the simple case, confining presentation objects to the event thread is completely natural. Listing 9.3 creates a button whose color changes randomly when pressed. When the user clicks on the button, the toolkit delivers an ActionEvent in the event thread to all registered action listeners. In response, the action listener picks a new color and changes the button¡¯s background color. So the event originates in the GUI toolkit and is delivered to the application, and the application modifies the GUI in response to the user¡¯s action. Control never has to leave the event thread, as illustrated in Figure 9.1.
+
+Figure 9.1. Control Flow of a Simple Button Click.
+
+
+
+
+This trivial example characterizes the majority of interactions between GUI applications and GUI toolkits. So long as tasks are short-lived and access only GUI objects (or other thread-confined or thread-safe application objects), you can almost totally ignore threading concerns and do everything from the event thread, and the right thing happens.
+
+Listing 9.1. Implementing SwingUtilities Using an Executor.
+
+Code View: Scroll / Show All
+public class SwingUtilities {
+    private static final ExecutorService exec =
+        Executors.newSingleThreadExecutor(new SwingThreadFactory());
+    private static volatile Thread swingThread;
+
+    private static class SwingThreadFactory implements ThreadFactory {
+        public Thread newThread(Runnable r) {
+            swingThread = new Thread(r);
+            return swingThread;
+        }
+    }
+
+    public static boolean isEventDispatchThread() {
+        return Thread.currentThread() == swingThread;
+    }
+
+    public static void invokeLater(Runnable task) {
+        exec.execute(task);
+    }
+
+    public static void invokeAndWait(Runnable task)
+            throws InterruptedException, InvocationTargetException {
+        Future f = exec.submit(task);
+        try {
+            f.get();
+        } catch (ExecutionException e) {
+            throw new InvocationTargetException(e);
+        }
+    }
+}
+
+
+					  
+
+Listing 9.2. Executor Built Atop SwingUtilities.
+
+public class GuiExecutor extends AbstractExecutorService {
+    // Singletons have a private constructor and a public factory
+    private static final GuiExecutor instance = new GuiExecutor();
+
+    private GuiExecutor() { }
+
+    public static GuiExecutor instance() { return instance; }
+
+    public void execute(Runnable r) {
+        if (SwingUtilities.isEventDispatchThread())
+            r.run();
+        else
+            SwingUtilities.invokeLater(r);
+    }
+
+    // Plus trivial implementations of lifecycle methods
+}
+
+Listing 9.3. Simple Event Listener.
+
+final Random random = new Random();
+final JButton button = new JButton("Change Color");
+...
+button.addActionListener(new ActionListener() {
+    public void actionPerformed(ActionEvent e) {
+        button.setBackground(new Color(random.nextInt()));
+    }
+});
+
+A slightly more complicated version of this same scenario, illustrated in Figure 9.2, involves the use of a formal data model such as a TableModel or TreeModel. Swing splits most visual components into two objects, a model and a view. The data to be displayed resides in the model and the rules governing how it is displayed reside in the view. The model objects can fire events indicating that the model data has changed, and views subscribe to these events. When the view receives an event indicating the model data may have changed, it queries the model for the new data and updates the display. So in a button listener that modifies the contents of a table, the action listener would update the model and call one of the fireXxx methods, which would in turn invoke the view¡¯s table model listeners, which would update the view. Again, control never leaves the event thread. (The Swing data model fireXxx methods always call the model listeners directly rather than submitting a new event to the event queue, so the fireXxx methods must be called only from the event thread.)
+
+Figure 9.2. Control Flow with Separate Model and View Objects.
+
+
+
+

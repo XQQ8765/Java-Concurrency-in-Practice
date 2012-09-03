@@ -1,0 +1,58 @@
+Chapter 9. GUI Applications
+If you¡¯ve tried to write even a simple GUI application using Swing, you know that GUI applications have their own peculiar threading issues. To maintain safety, certain tasks must run in the Swing event thread. But you cannot execute longrunning tasks in the event thread, lest the UI become unresponsive. And Swing data structures are not thread-safe, so you must be careful to confine them to the event thread.
+
+Nearly all GUI toolkits, including Swing and SWT, are implemented as singlethreaded subsystems in which all GUI activity is confined to a single thread. If you are not planning to write a totally single-threaded program, there will be activities that run partially in an application thread and partially in the event thread. Like many other threading bugs, getting this division wrong may not necessarily make your program crash immediately; instead, it could behave oddly under hard-to-identify conditions. Even though the GUI frameworks themselves are single-threaded subsystems, your application may not be, and you still need to consider threading issues carefully when writing GUI code.
+
+9.1. Why are GUIs Single-threaded?
+
+In the old days, GUI applications were single-threaded and GUI events were processed from a ¡°main event loop¡±. Modern GUI frameworks use a model that is only slightly different: they create a dedicated event dispatch thread (EDT) for handling GUI events.
+
+Single-threaded GUI frameworks are not unique to Java; Qt, NextStep, MacOS Cocoa, X Windows, and many others are also single-threaded. This is not for lack of trying; there have been many attempts to write multithreaded GUI frameworks, but because of persistent problems with race conditions and deadlock, they all eventually arrived at the single-threaded event queue model in which a dedicated thread fetches events off a queue and dispatches them to applicationdefined event handlers. (AWT originally tried to support a greater degree of multithreaded access, and the decision to make Swing single-threaded was based largely on experience with AWT.)
+
+Multithreaded GUI frameworks tend to be particularly susceptible to deadlock, partially because of the unfortunate interaction between input event processing and any sensible object-oriented modeling of GUI components. Actions initiated by the user tend to ¡°bubble up¡± from the OS to the application¡ªa mouse click is detected by the OS, is turned into a ¡°mouse click¡± event by the toolkit, and is eventually delivered to an application listener as a higher level event such as a ¡°button pressed¡± event. On the other hand, application-initiated actions ¡°bubble down¡± from the application to the OS¡ªchanging the background color of a component originates in the application and is dispatched to a specific component class and eventually into the OS for rendering. Combining this tendency for activities to access the same GUI objects in the opposite order with the requirement of making each object thread-safe yields a recipe for inconsistent lock ordering, which leads to deadlock (see Chapter 10). And this is exactly what nearly every GUI toolkit development effort rediscovered through experience.
+
+Another factor leading to deadlock in multithreaded GUI frameworks is the prevalence of the model-view-control (MVC) pattern. Factoring user interactions into cooperating model, view, and controller objects greatly simplifies implementing GUI applications, but again raises the risk of inconsistent lock ordering. The controller calls into the model, which notifies the view that something has changed. But the controller can also call into the view, which may in turn call back into the model to query the model state. The result is again inconsistent lock ordering, with the attendant risk of deadlock.
+
+In his weblog,[1] Sun VP Graham Hamilton nicely sums up the challenges, describing why the multithreaded GUI toolkit is one of the recurring ¡°failed dreams¡± of computer science.
+
+[1] http://weblogs.java.net/blog/kgh/archive/2004/10
+
+I believe you can program successfully with multithreaded GUI toolkits if the toolkit is very carefully designed; if the toolkit exposes its locking methodology in gory detail; if you are very smart, very careful, and have a global understanding of the whole structure of the toolkit. If you get one of these things slightly wrong, things will mostly work, but you will get occasional hangs (due to deadlocks) or glitches (due to races). This multithreaded approach works best for people who have been intimately involved in the design of the toolkit.
+
+Unfortunately, I don¡¯t think this set of characteristics scales to widespread commercial use. What you tend to end up with is normal smart programmers building apps that don¡¯t quite work reliably for reasons that are not at all obvious. So the authors get very disgruntled and frustrated and use bad words on the poor innocent toolkit.
+
+Single-threaded GUI frameworks achieve thread safety via thread confinement; all GUI objects, including visual components and data models, are accessed exclusively from the event thread. Of course, this just pushes some of the thread safety burden back onto the application developer, who must make sure these objects are properly confined.
+
+9.1.1. Sequential Event Processing
+
+GUI applications are oriented around processing fine-grained events such as mouse clicks, key presses, or timer expirations. Events are a kind of task; the event handling machinery provided by AWT and Swing is structurally similar to an Executor.
+
+Because there is only a single thread for processing GUI tasks, they are processed sequentially¡ªone task finishes before the next one begins, and no two tasks overlap. Knowing this makes writing task code easier¡ªyou don¡¯t have to worry about interference from other tasks.
+
+The downside of sequential task processing is that if one task takes a long time to execute, other tasks must wait until it is finished. If those other tasks are responsible for responding to user input or providing visual feedback, the application will appear to have frozen. If a lengthy task is running in the event thread, the user cannot even click ¡°Cancel¡± because the cancel button listener is not called until the lengthy task completes. Therefore, tasks that execute in the event thread must return control to the event thread quickly. To initiate a longrunning task such as spell-checking a large document, searching the file system, or fetching a resource over a network, you must run that task in another thread so control can return quickly to the event thread. To update a progress indicator while a long-running task executes or provide visual feedback when it completes, you again need to execute code in the event thread. This can get complicated quickly.
+
+9.1.2. Thread Confinement in Swing
+
+All Swing components (such as JButton and JTable) and data model objects (such as TableModel and TreeModel) are confined to the event thread, so any code that accesses these objects must run in the event thread. GUI objects are kept consistent not by synchronization, but by thread confinement. The upside is that tasks that run in the event thread need not worry about synchronization when accessing presentation objects; the downside is that you cannot access presentation objects from outside the event thread at all.
+
+The Swing single-thread rule: Swing components and models should be created, modified, and queried only from the event-dispatching thread.
+
+
+As with all rules, there are a few exceptions. A small number of Swing methods may be called safely from any thread; these are clearly identified in the Javadoc as being thread-safe. Other exceptions to the single-thread rule include:
+
+SwingUtilities.isEventDispatchThread, which determines whether the current thread is the event thread;
+
+SwingUtilities.invokeLater, which schedules a Runnable for execution on the event thread (callable from any thread);
+
+SwingUtilities.invokeAndWait, which schedules a Runnable task for execution on the event thread and blocks the current thread until it completes (callable only from a non-GUI thread);
+
+methods to enqueue a repaint or revalidation request on the event queue (callable from any thread); and
+
+methods for adding and removing listeners (can be called from any thread, but listeners will always be invoked in the event thread).
+
+The invokeLater and invokeAndWait methods function a lot like an Executor. In fact, it is trivial to implement the threading-related methods from SwingUtilities using a single-threaded Executor, as shown in Listing 9.1. This is not how SwingUtilities is actually implemented, as Swing predates the Executor framework, but is probably how it would be if Swing were being implemented today.
+
+The Swing event thread can be thought of as a single-threaded Executor that processes tasks from the event queue. As with thread pools, sometimes the worker thread dies and is replaced by a new one, but this should be transparent to tasks. Sequential, single-threaded execution is a sensible execution policy when tasks are short-lived, scheduling predictability is not important, or it is imperative that tasks not execute concurrently.
+
+GuiExecutor in Listing 9.2 is an Executor that delegates tasks to SwingUtilities for execution. It could be implemented in terms of other GUI frameworks as well; for example, SWT provides the Display.asyncExec method, which is similar to Swing¡¯s invokeLater.
+

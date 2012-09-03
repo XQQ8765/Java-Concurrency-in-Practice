@@ -1,0 +1,6 @@
+9.5. Other Forms of Single-threaded Subsystems
+
+Thread confinement is not restricted to GUIs: it can be used whenever a facility is implemented as a single-threaded subsystem. Sometimes thread confinement is forced on the developer for reasons that have nothing to do with avoiding synchronization or deadlock. For example, some native libraries require that all access to the library, even loading the library with System.loadLibrary, bemade from the same thread.
+
+Borrowing from the approach taken by GUI frameworks, you can easily create a dedicated thread or single-threaded executor for accessing the native library, and provide a proxy object that intercepts calls to the thread-confined object and submits them as tasks to the dedicated thread. Future and newSingleThreadExecutor work together to make this easy; the proxy method can submit the task and immediately call Future.get to wait for the result. (If the class to be threadconfined implements an interface, you can automate the process of having each method submit a Callable to a background thread executor and waiting for the result using dynamic proxies.)
+
